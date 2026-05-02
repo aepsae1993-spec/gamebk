@@ -1,0 +1,17 @@
+{
+  "name": "lms-quest-web",
+  "version": "0.1.0",
+  "private": true,
+  "description": "LMS Quest - migrated from Google Apps Script to Vercel + Supabase",
+  "scripts": {
+    "dev": "vercel dev",
+    "deploy": "vercel --prod"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.4",
+    "jsonwebtoken": "^9.0.2"
+  },
+  "engines": {
+    "node": ">=18.x"
+  }
+}

@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LMS Quest — Bulk Import</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Prompt:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.tailwindcss.com/3.3.5"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+    <style>
+        body { font-family: 'Prompt', sans-serif; background: #0f172a; color: #e2e8f0; min-height: 100vh; }
+        [x-cloak] { display: none !important; }
+        .panel { background: rgba(30,41,59,0.8); border: 1px solid rgba(148,163,184,0.15); border-radius: 12px; }
+        .input { background: rgba(15,23,42,0.6); border: 1px solid #475569; color: #f8fafc; border-radius: 8px; padding: 8px 12px; width: 100%; }
+        .input:focus { outline: none; border-color: #8b5cf6; box-shadow: 0 0 0 2px rgba(139,92,246,0.2); }
+        .btn { padding: 8px 16px; border-radius: 8px; font-weight: 600; transition: all .2s; cursor: pointer; }
+        .btn-primary { background: linear-gradient(135deg, #6366f1, #8b5cf6); color: white; }
+        .btn-primary:hover { filter: brightness(1.1); transform: translateY(-1px); }
+        .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+        .btn-ghost { background: rgba(71,85,105,0.4); color: #cbd5e1; }
+        .btn-ghost:hover { background: rgba(71,85,105,0.6); }
+        .preview-table { font-size: 12px; }
+        .preview-table th { background: #1e293b; color: #cbd5e1; padding: 6px 10px; text-align: left; border-bottom: 1px solid #334155; }
+        .preview-table td { padding: 6px 10px; border-bottom: 1px solid #1e293b; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .badge { display: inline-block; padding: 2px 8px; border-radius: 6px; font-size: 11px; font-weight: 600; }
+    </style>
+</head>
+<body x-data="importApp()" x-init="init()" x-cloak class="p-4 md:p-8">
+
+<div class="max-w-6xl mx-auto">
+    <div class="flex items-center justify-between mb-6">
+        <div>
+            <h1 class="text-2xl md:text-3xl font-bold text-white">📥 Bulk Import</h1>
+            <p class="text-sm text-slate-400 mt-1">วาง (paste) ข้อมูลจาก Google Sheets / Excel → preview → บันทึกลง Supabase</p>
+        </div>
+        <a href="/" class="btn btn-ghost text-sm">← กลับหน้าหลัก</a>
+    </div>
+
+    <!-- ไม่ได้ล็อกอิน -->
+    <div x-show="!user" class="panel p-6 text-center">
+        <p class="text-slate-300 mb-3">กรุณาเข้าสู่ระบบในฐานะ Admin ก่อน</p>
+        <a href="/" class="btn btn-primary inline-block">ไปหน้าล็อกอิน</a>
+    </div>
+
+    <div x-show="user" class="space-y-4">
+
+        <!-- Step 1: เลือกตาราง -->
+        <div class="panel p-5">
+            <div class="text-xs uppercase tracking-widest text-slate-500 mb-2">Step 1</div>
+            <h2 class="text-lg font-bold mb-3">เลือกตาราง</h2>
+            <select class="input" x-model="selectedTable" @change="onTableChange()">
+                <option value="">-- เลือกตาราง --</option>
+                <template x-for="(meta, key) in tables" :key="key">
+                    <option :value="key" x-text="key + ' — ' + meta.label"></option>
+                </template>
+            </select>
+            <div x-show="selectedTable" class="mt-3 text-xs">
+                <div class="text-slate-400 mb-1">คอลัมน์ที่ต้องมี (ลำดับนี้คือลำดับใน paste):</div>
+                <div class="flex flex-wrap gap-1">
+                    <template x-for="c in tableMeta.cols" :key="c">
+                        <span class="badge"
+                              :class="c === tableMeta.pk ? 'bg-purple-600 text-white' : 'bg-slate-700 text-slate-200'"
+                              x-text="c + (c === tableMeta.pk ? ' (PK)' : '')"></span>
+                    </template>
+                </div>
+                <div class="text-slate-500 mt-2" x-show="tableMeta.kind === 'auto'">
+                    ⓘ ตารางนี้สร้าง ID อัตโนมัติ — ใช้โหมด <b>append</b> เท่านั้น
+                </div>
+            </div>
+        </div>
+
+        <!-- Step 2: paste data -->
+        <div class="panel p-5" x-show="selectedTable">
+            <div class="text-xs uppercase tracking-widest text-slate-500 mb-2">Step 2</div>
+            <h2 class="text-lg font-bold mb-2">วางข้อมูล</h2>
+            <p class="text-xs text-slate-400 mb-2">
+                copy จาก Google Sheets/Excel แล้ว Ctrl+V ที่นี่ — แถวบนสุดเป็น header (ชื่อคอลัมน์)
+            </p>
+            <textarea class="input font-mono text-xs" rows="10"
+                      placeholder="pet_type	rarity	emoji1	emoji2	...&#10;dog	C	🐶	🐕	..."
+                      x-model="pasteText"></textarea>
+
+            <div class="flex flex-wrap items-center gap-2 mt-3">
+                <button class="btn btn-primary" :disabled="!pasteText.trim()" @click="parsePaste()">
+                    🔍 Parse / Preview
+                </button>
+                <button class="btn btn-ghost text-sm" @click="pasteText=''; parsed=null;">ล้าง</button>
+                <span x-show="parsed" class="text-xs text-slate-400 ml-2"
+                      x-text="'parse ได้ ' + parsed.rows.length + ' แถว / delimiter = ' + (parsed.delimiter==='\t'?'TAB':'COMMA')"></span>
+            </div>
+        </div>
+
+        <!-- Step 3: preview + save -->
+        <div class="panel p-5" x-show="parsed">
+            <div class="text-xs uppercase tracking-widest text-slate-500 mb-2">Step 3</div>
+            <h2 class="text-lg font-bold mb-3">ตรวจ + บันทึก</h2>
+
+            <!-- header mapping warning -->
+            <div x-show="parsed && parsed.unknownCols.length > 0" class="mb-3 p-3 rounded-lg bg-amber-900/30 border border-amber-700 text-amber-200 text-xs">
+                <div class="font-semibold mb-1">⚠️ พบ headers ที่ไม่ตรงกับคอลัมน์ — จะถูกข้าม:</div>
+                <code x-text="parsed.unknownCols.join(', ')"></code>
+                <div class="mt-1 text-amber-300/80">แก้ headers ให้ตรงกับชื่อคอลัมน์ด้านบน แล้ว Parse ใหม่</div>
+            </div>
+            <div x-show="parsed && parsed.missingCols.length > 0" class="mb-3 p-3 rounded-lg bg-red-900/30 border border-red-700 text-red-200 text-xs">
+                <div class="font-semibold mb-1">❗ ขาด PK column:</div>
+                <code x-text="parsed.missingCols.join(', ')"></code>
+            </div>
+
+            <!-- preview table -->
+            <div x-show="parsed && parsed.rows.length > 0" class="overflow-x-auto rounded-lg border border-slate-700 mb-4 max-h-96 overflow-y-auto">
+                <table class="preview-table w-full">
+                    <thead>
+                        <tr>
+                            <th>#</th>
+                            <template x-for="c in parsed.usedCols" :key="c">
+                                <th x-text="c"></th>
+                            </template>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <template x-for="(row, i) in parsed.rows.slice(0, 50)" :key="i">
+                            <tr class="hover:bg-slate-800/50">
+                                <td class="text-slate-500" x-text="i+1"></td>
+                                <template x-for="c in parsed.usedCols" :key="c">
+                                    <td x-text="row[c] || ''" :title="row[c] || ''"></td>
+                                </template>
+                            </tr>
+                        </template>
+                    </tbody>
+                </table>
+                <div x-show="parsed.rows.length > 50" class="text-center text-xs text-slate-500 py-2">
+                    ... แสดง 50 แถวแรก จากทั้งหมด <span x-text="parsed.rows.length"></span> แถว
+                </div>
+            </div>
+
+            <!-- mode selector -->
+            <div class="flex flex-wrap gap-3 items-center mb-4">
+                <label class="text-sm text-slate-300">โหมดบันทึก:</label>
+                <select class="input max-w-xs" x-model="mode">
+                    <template x-if="tableMeta.kind === 'natural'">
+                        <optgroup label="ตารางมี PK เอง">
+                            <option value="upsert">upsert — เพิ่ม/อัปเดตตาม PK (ปลอดภัยที่สุด)</option>
+                            <option value="replace">replace — ลบทั้งตารางก่อน แล้วใส่ใหม่ (ระวัง!)</option>
+                            <option value="append">append — insert ใหม่ทั้งหมด (ถ้า PK ซ้ำจะ error)</option>
+                        </optgroup>
+                    </template>
+                    <template x-if="tableMeta.kind === 'auto'">
+                        <option value="append">append — เพิ่มแถวใหม่ (PK auto-gen)</option>
+                    </template>
+                </select>
+            </div>
+
+            <button class="btn btn-primary"
+                    :disabled="!parsed || parsed.rows.length === 0 || isLoading || (parsed.missingCols && parsed.missingCols.length > 0)"
+                    @click="save()">
+                <span x-show="!isLoading">💾 บันทึกลง Supabase</span>
+                <span x-show="isLoading">กำลังบันทึก...</span>
+            </button>
+        </div>
+
+        <!-- result -->
+        <div x-show="result" class="panel p-4"
+             :class="result && result.success ? 'border-emerald-600' : 'border-red-600'">
+            <pre class="text-xs whitespace-pre-wrap" x-text="result ? JSON.stringify(result, null, 2) : ''"></pre>
+        </div>
+    </div>
+</div>
+
+<script>
+const TOKEN_KEY = 'lms_token';
+
+async function rpc(fn, ...args) {
+    const token = localStorage.getItem(TOKEN_KEY);
+    const headers = { 'Content-Type': 'application/json' };
+    if (token) headers['Authorization'] = 'Bearer ' + token;
+    const resp = await fetch('/api/rpc', {
+        method: 'POST', headers,
+        body: JSON.stringify({ fn, args })
+    });
+    if (resp.status === 401) {
+        localStorage.removeItem(TOKEN_KEY);
+        localStorage.removeItem('lms_session');
+        throw new Error('กรุณาล็อกอินใหม่');
+    }
+    const data = await resp.json();
+    if (!resp.ok) throw new Error((data && data.message) || ('HTTP ' + resp.status));
+    return data;
+}
+
+function importApp() {
+    return {
+        user: null,
+        tables: {},
+        selectedTable: '',
+        tableMeta: { cols: [], pk: '', kind: 'natural' },
+        pasteText: '',
+        parsed: null,
+        mode: 'upsert',
+        isLoading: false,
+        result: null,
+
+        async init() {
+            // เช็คล็อกอิน
+            try {
+                const sess = JSON.parse(localStorage.getItem('lms_session') || 'null');
+                if (sess && sess.user && sess.user.role === 'Admin') this.user = sess.user;
+            } catch(e) {}
+            if (!this.user) return;
+
+            try {
+                this.tables = await rpc('getImportTables');
+            } catch(e) {
+                this.result = { success: false, message: e.message };
+            }
+        },
+
+        onTableChange() {
+            this.parsed = null;
+            this.result = null;
+            if (!this.selectedTable) {
+                this.tableMeta = { cols: [], pk: '', kind: 'natural' };
+                return;
+            }
+            this.tableMeta = this.tables[this.selectedTable];
+            this.mode = this.tableMeta.kind === 'auto' ? 'append' : 'upsert';
+        },
+
+        // parse TSV (จาก Sheets paste) หรือ CSV
+        parsePaste() {
+            const text = this.pasteText.replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim();
+            if (!text) return;
+
+            // detect delimiter: ถ้าแถวแรกมี \t = TSV ไม่งั้นเป็น CSV
+            const firstLine = text.split('\n')[0];
+            const delimiter = firstLine.includes('\t') ? '\t' : ',';
+
+            const lines = text.split('\n').filter(l => l.trim().length > 0);
+            const splitLine = (line) => {
+                if (delimiter === '\t') return line.split('\t');
+                // CSV with quoted support
+                const out = []; let cur = ''; let inQ = false;
+                for (let i = 0; i < line.length; i++) {
+                    const ch = line[i];
+                    if (ch === '"') { inQ = !inQ; continue; }
+                    if (ch === ',' && !inQ) { out.push(cur); cur = ''; continue; }
+                    cur += ch;
+                }
+                out.push(cur);
+                return out;
+            };
+
+            const rawHeaders = splitLine(lines[0]).map(h => h.trim());
+            const allowed = this.tableMeta.cols;
+            const usedCols = [];
+            const unknownCols = [];
+            const colIdx = {}; // map ชื่อคอลัมน์ → index ใน rawHeaders
+            rawHeaders.forEach((h, i) => {
+                if (!h) { unknownCols.push('(empty col ' + (i+1) + ')'); return; }
+                if (allowed.includes(h)) {
+                    if (!usedCols.includes(h)) usedCols.push(h);
+                    colIdx[h] = i;
+                } else {
+                    unknownCols.push(h);
+                }
+            });
+
+            // ตรวจว่ามี PK (เฉพาะ natural)
+            const missingCols = [];
+            if (this.tableMeta.kind === 'natural' && !usedCols.includes(this.tableMeta.pk)) {
+                missingCols.push(this.tableMeta.pk);
+            }
+
+            const rows = [];
+            for (let li = 1; li < lines.length; li++) {
+                const cells = splitLine(lines[li]);
+                const obj = {};
+                usedCols.forEach(c => { obj[c] = (cells[colIdx[c]] || '').trim(); });
+                // ข้ามแถวว่างทั้งแถว
+                if (Object.values(obj).some(v => v !== '')) rows.push(obj);
+            }
+
+            this.parsed = { delimiter, rawHeaders, usedCols, unknownCols, missingCols, rows };
+            this.result = null;
+        },
+
+        async save() {
+            if (!this.parsed || this.parsed.rows.length === 0) return;
+            if (this.parsed.missingCols && this.parsed.missingCols.length > 0) return;
+            this.isLoading = true; this.result = null;
+            try {
+                const r = await rpc('bulkImportTable', {
+                    table: this.selectedTable, mode: this.mode, rows: this.parsed.rows
+                });
+                this.result = r;
+            } catch (e) {
+                this.result = { success: false, message: e.message };
+            }
+            this.isLoading = false;
+        }
+    };
+}
+</script>
+</body>
+</html>
