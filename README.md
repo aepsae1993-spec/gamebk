@@ -133,12 +133,19 @@ npm run dev              # ใช้ vercel dev (รันที่ localhost:30
 
 **วิธี A: Bulk Import (แนะนำ — paste จาก Google Sheets ทั้งทีเดียว)**
 1. ล็อกอินเป็น Admin ที่หน้าหลัก แล้วกดไอคอน 📤 (มุมขวาบน) — หรือไปที่ `/import.html` ตรง ๆ
-2. เลือกตาราง (เช่น `pet_images`)
-3. ใน Google Sheet ของคุณ: แก้ headers แถวบนสุดให้ตรงกับชื่อคอลัมน์ที่หน้าจอแสดง (snake_case)
-4. คลุม **เฉพาะข้อมูล + headers** → Ctrl+C → Ctrl+V ลงในช่อง textarea
-5. กด *Parse / Preview* → ตรวจดูตาราง preview
-6. เลือกโหมด: `upsert` (อัปเดตตาม PK ปลอดภัยที่สุด) | `replace` (ลบทั้งหมดก่อนใส่ใหม่) | `append`
+2. เลือกตาราง — ตอนนี้รองรับ:
+    - `pet_config` / `pet_images` / `equip_images` / `material_images` (รูปและข้อมูลสัตว์/อุปกรณ์)
+    - `users` (นำเข้าทะเบียนนักเรียนล่วงหน้า — status auto = `Advance`, role auto = `Student`)
+    - `classes` / `subjects` / `assignments` (ชั้นเรียน/วิชา/ภารกิจ)
+    - `announcements` (ประกาศ)
+    - `settings` (key-value config — value แปลงเป็น JSON ให้อัตโนมัติ: `100` → number, `true` → boolean, `{"a":1}` → object)
+3. ดูลำดับคอลัมน์ที่ระบบบอก → จัด Sheet ให้ตรงลำดับ
+4. คลุม **เฉพาะเซลล์ข้อมูล** (ไม่ต้องเอา header มา) → Ctrl+C → Ctrl+V ลง textarea
+5. กด *Parse / Preview* → ตรวจดูตาราง preview (PK ที่ว่างจะไฮไลต์แดง)
+6. เลือกโหมด: `upsert` (อัปเดตตาม PK ปลอดภัยที่สุด) | `replace` (ลบทั้งหมดก่อนใส่ใหม่) | `append` (insert ใหม่)
 7. กด *บันทึกลง Supabase*
+
+> ⓘ ตารางที่ PK สร้างอัตโนมัติ (`classes`, `subjects`, `users`, `assignments`, `announcements`) ใช้ได้เฉพาะโหมด `append`
 
 **วิธี B: Edit ทีละ row ใน Supabase Table Editor**
 - `pet_images` → ใส่ `stage1_url`...`stage5_url` ของแต่ละ `pet_type`

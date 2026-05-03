@@ -30,14 +30,35 @@ const TABLES = {
     cols: ['mat_key','name','image_url']
   },
   classes: {
-    label: 'Classes (ชั้นเรียน)',
+    label: 'Classes (ชั้นเรียน — สร้าง ID อัตโนมัติ)',
     pk: 'class_id', kind: 'auto',
     cols: ['class_name','year','term']
   },
   subjects: {
-    label: 'Subjects (รายวิชา)',
+    label: 'Subjects (รายวิชา — สร้าง ID อัตโนมัติ)',
     pk: 'subject_id', kind: 'auto',
     cols: ['subject_code','subject_name','class_id','teacher_id']
+  },
+  users: {
+    label: 'Users (นักเรียน/ครู — แนะนำใช้สำหรับนำเข้าทะเบียนนักเรียนล่วงหน้า)',
+    pk: 'user_id', kind: 'auto',
+    // password_hash เว้นว่างได้ (นักเรียนจะลงทะเบียนเองด้วย citizen_id) — ระบบ default status='Advance' ให้ถ้าว่าง
+    cols: ['name','role','citizen_id','grade','username','email','status','password_hash']
+  },
+  assignments: {
+    label: 'Assignments (ภารกิจ — สร้าง ID อัตโนมัติ)',
+    pk: 'assign_id', kind: 'auto',
+    cols: ['subject_id','title','due_date','max_score','bonus_gold']
+  },
+  announcements: {
+    label: 'Announcements (ประกาศ — สร้าง ID อัตโนมัติ)',
+    pk: 'id', kind: 'auto',
+    cols: ['title','content','scope','author_id','author_name']
+  },
+  settings: {
+    label: 'Settings (key-value — ค่า config ของระบบ)',
+    pk: 'key', kind: 'natural',
+    cols: ['key','value']
   }
 };
 
@@ -72,7 +93,7 @@ async function bulkImportTable(ctx, payload) {
   if (!['append','upsert','replace'].includes(mode)) mode = 'upsert';
 
   // sanitize: เก็บเฉพาะคอลัมน์ที่อนุญาต + ตัด empty
-  const cleaned = rows.map(r => {
+  let cleaned = rows.map(r => {
     const out = {};
     for (const c of meta.cols) {
       let v = r[c];
@@ -83,6 +104,38 @@ async function bulkImportTable(ctx, payload) {
     }
     return out;
   }).filter(o => Object.keys(o).length > 0);
+
+  // ===== per-table preprocessing =====
+
+  // users: default role='Student', status='Advance' (สำหรับ flow นำเข้าทะเบียนล่วงหน้า)
+  if (payload.table === 'users') {
+    cleaned = cleaned.map(r => {
+      if (!r.role) r.role = 'Student';
+      if (!r.status) r.status = 'Advance';
+      return r;
+    });
+  }
+
+  // settings: แปลง value string เป็น JSON value (number/boolean/object) ถ้าทำได้
+  if (payload.table === 'settings') {
+    cleaned = cleaned.map(r => {
+      if (typeof r.value === 'string') {
+        const s = r.value.trim();
+        // ลอง parse เป็น JSON ก่อน
+        try {
+          r.value = JSON.parse(s);
+        } catch {
+          // ถ้าไม่ใช่ JSON valid → ตรวจ true/false/number ด้วยมือ
+          const lower = s.toLowerCase();
+          if (lower === 'true') r.value = true;
+          else if (lower === 'false') r.value = false;
+          else if (s !== '' && !isNaN(s)) r.value = Number(s);
+          else r.value = s;
+        }
+      }
+      return r;
+    });
+  }
 
   if (cleaned.length === 0) return fail('ข้อมูลทุกแถวว่าง — ตรวจ headers ให้ตรงกับคอลัมน์ที่อนุญาต');
 
