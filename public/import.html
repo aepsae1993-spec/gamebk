@@ -56,12 +56,12 @@
                 </template>
             </select>
             <div x-show="selectedTable" class="mt-3 text-xs">
-                <div class="text-slate-400 mb-1">คอลัมน์ที่ต้องมี (ลำดับนี้คือลำดับใน paste):</div>
+                <div class="text-slate-400 mb-1">ลำดับคอลัมน์ที่ระบบจะใช้ (วางเนื้อหาตามลำดับนี้):</div>
                 <div class="flex flex-wrap gap-1">
-                    <template x-for="c in tableMeta.cols" :key="c">
+                    <template x-for="(c, i) in tableMeta.cols" :key="c">
                         <span class="badge"
                               :class="c === tableMeta.pk ? 'bg-purple-600 text-white' : 'bg-slate-700 text-slate-200'"
-                              x-text="c + (c === tableMeta.pk ? ' (PK)' : '')"></span>
+                              x-text="(i+1) + '. ' + c + (c === tableMeta.pk ? ' (PK)' : '')"></span>
                     </template>
                 </div>
                 <div class="text-slate-500 mt-2" x-show="tableMeta.kind === 'auto'">
@@ -73,12 +73,17 @@
         <!-- Step 2: paste data -->
         <div class="panel p-5" x-show="selectedTable">
             <div class="text-xs uppercase tracking-widest text-slate-500 mb-2">Step 2</div>
-            <h2 class="text-lg font-bold mb-2">วางข้อมูล</h2>
+            <h2 class="text-lg font-bold mb-2">วางข้อมูล (เฉพาะเนื้อหา ไม่ต้องเอา header มา)</h2>
             <p class="text-xs text-slate-400 mb-2">
-                copy จาก Google Sheets/Excel แล้ว Ctrl+V ที่นี่ — แถวบนสุดเป็น header (ชื่อคอลัมน์)
+                copy <b>เฉพาะเซลล์ข้อมูล</b> จาก Google Sheets/Excel แล้ว Ctrl+V ที่นี่ —
+                ระบบจะ map คอลัมน์ตามลำดับด้านบน (1, 2, 3, ...)
             </p>
+            <label class="flex items-center gap-2 text-xs text-slate-400 mb-2">
+                <input type="checkbox" x-model="skipFirstRow" class="rounded">
+                <span>ข้ามแถวแรก (กรณีเผลอ copy header มาด้วย)</span>
+            </label>
             <textarea class="input font-mono text-xs" rows="10"
-                      placeholder="pet_type	rarity	emoji1	emoji2	...&#10;dog	C	🐶	🐕	..."
+                      placeholder="dog	C	🐶	🐕	🦮	🐺		ลูกหมา	หมาโต	หมานำทาง	หมาป่า&#10;cat	C	🐱	🐈	🐈‍⬛	🦁		ลูกแมว	แมวบ้าน	แมวดำ	สิงโต"
                       x-model="pasteText"></textarea>
 
             <div class="flex flex-wrap items-center gap-2 mt-3">
@@ -96,15 +101,12 @@
             <div class="text-xs uppercase tracking-widest text-slate-500 mb-2">Step 3</div>
             <h2 class="text-lg font-bold mb-3">ตรวจ + บันทึก</h2>
 
-            <!-- header mapping warning -->
-            <div x-show="parsed && parsed.unknownCols.length > 0" class="mb-3 p-3 rounded-lg bg-amber-900/30 border border-amber-700 text-amber-200 text-xs">
-                <div class="font-semibold mb-1">⚠️ พบ headers ที่ไม่ตรงกับคอลัมน์ — จะถูกข้าม:</div>
-                <code x-text="parsed.unknownCols.join(', ')"></code>
-                <div class="mt-1 text-amber-300/80">แก้ headers ให้ตรงกับชื่อคอลัมน์ด้านบน แล้ว Parse ใหม่</div>
+            <!-- warnings -->
+            <div x-show="parsed && parsed.extraCols > 0" class="mb-3 p-3 rounded-lg bg-amber-900/30 border border-amber-700 text-amber-200 text-xs">
+                ⚠️ ข้อมูลที่วางมีคอลัมน์เกินจาก schema (<span x-text="parsed.extraCols"></span> คอลัมน์เกิน) — คอลัมน์ส่วนเกินจะถูกตัดทิ้ง
             </div>
-            <div x-show="parsed && parsed.missingCols.length > 0" class="mb-3 p-3 rounded-lg bg-red-900/30 border border-red-700 text-red-200 text-xs">
-                <div class="font-semibold mb-1">❗ ขาด PK column:</div>
-                <code x-text="parsed.missingCols.join(', ')"></code>
+            <div x-show="parsed && parsed.missingPkRows > 0" class="mb-3 p-3 rounded-lg bg-red-900/30 border border-red-700 text-red-200 text-xs">
+                ❗ มี <span x-text="parsed.missingPkRows"></span> แถวที่ขาดค่า PK (<code x-text="tableMeta.pk"></code>) — ต้องแก้ก่อน save
             </div>
 
             <!-- preview table -->
@@ -113,8 +115,8 @@
                     <thead>
                         <tr>
                             <th>#</th>
-                            <template x-for="c in parsed.usedCols" :key="c">
-                                <th x-text="c"></th>
+                            <template x-for="c in tableMeta.cols" :key="c">
+                                <th x-text="c" :class="c === tableMeta.pk ? 'text-purple-300' : ''"></th>
                             </template>
                         </tr>
                     </thead>
@@ -122,8 +124,9 @@
                         <template x-for="(row, i) in parsed.rows.slice(0, 50)" :key="i">
                             <tr class="hover:bg-slate-800/50">
                                 <td class="text-slate-500" x-text="i+1"></td>
-                                <template x-for="c in parsed.usedCols" :key="c">
-                                    <td x-text="row[c] || ''" :title="row[c] || ''"></td>
+                                <template x-for="c in tableMeta.cols" :key="c">
+                                    <td x-text="row[c] || ''" :title="row[c] || ''"
+                                        :class="c === tableMeta.pk && !row[c] ? 'bg-red-900/40 text-red-300' : ''"></td>
                                 </template>
                             </tr>
                         </template>
@@ -152,7 +155,7 @@
             </div>
 
             <button class="btn btn-primary"
-                    :disabled="!parsed || parsed.rows.length === 0 || isLoading || (parsed.missingCols && parsed.missingCols.length > 0)"
+                    :disabled="!parsed || parsed.rows.length === 0 || isLoading || parsed.missingPkRows > 0"
                     @click="save()">
                 <span x-show="!isLoading">💾 บันทึกลง Supabase</span>
                 <span x-show="isLoading">กำลังบันทึก...</span>
@@ -195,6 +198,7 @@ function importApp() {
         selectedTable: '',
         tableMeta: { cols: [], pk: '', kind: 'natural' },
         pasteText: '',
+        skipFirstRow: false,
         parsed: null,
         mode: 'upsert',
         isLoading: false,
@@ -226,16 +230,15 @@ function importApp() {
             this.mode = this.tableMeta.kind === 'auto' ? 'append' : 'upsert';
         },
 
-        // parse TSV (จาก Sheets paste) หรือ CSV
+        // parse TSV (จาก Sheets paste) หรือ CSV — map ตามตำแหน่งคอลัมน์ (ไม่อ่าน header)
         parsePaste() {
             const text = this.pasteText.replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim();
             if (!text) return;
 
-            // detect delimiter: ถ้าแถวแรกมี \t = TSV ไม่งั้นเป็น CSV
+            // detect delimiter จากแถวแรก
             const firstLine = text.split('\n')[0];
             const delimiter = firstLine.includes('\t') ? '\t' : ',';
 
-            const lines = text.split('\n').filter(l => l.trim().length > 0);
             const splitLine = (line) => {
                 if (delimiter === '\t') return line.split('\t');
                 // CSV with quoted support
@@ -250,37 +253,28 @@ function importApp() {
                 return out;
             };
 
-            const rawHeaders = splitLine(lines[0]).map(h => h.trim());
-            const allowed = this.tableMeta.cols;
-            const usedCols = [];
-            const unknownCols = [];
-            const colIdx = {}; // map ชื่อคอลัมน์ → index ใน rawHeaders
-            rawHeaders.forEach((h, i) => {
-                if (!h) { unknownCols.push('(empty col ' + (i+1) + ')'); return; }
-                if (allowed.includes(h)) {
-                    if (!usedCols.includes(h)) usedCols.push(h);
-                    colIdx[h] = i;
-                } else {
-                    unknownCols.push(h);
-                }
-            });
+            let lines = text.split('\n').filter(l => l.trim().length > 0);
+            if (this.skipFirstRow && lines.length > 0) lines = lines.slice(1);
 
-            // ตรวจว่ามี PK (เฉพาะ natural)
-            const missingCols = [];
-            if (this.tableMeta.kind === 'natural' && !usedCols.includes(this.tableMeta.pk)) {
-                missingCols.push(this.tableMeta.pk);
-            }
-
+            const cols = this.tableMeta.cols;
             const rows = [];
-            for (let li = 1; li < lines.length; li++) {
-                const cells = splitLine(lines[li]);
+            let extraCols = 0;
+            let missingPkRows = 0;
+
+            for (let li = 0; li < lines.length; li++) {
+                const cells = splitLine(lines[li]).map(c => c.trim());
+                if (cells.every(v => v === '')) continue; // ข้ามแถวว่าง
+                if (cells.length > cols.length) extraCols = Math.max(extraCols, cells.length - cols.length);
+
                 const obj = {};
-                usedCols.forEach(c => { obj[c] = (cells[colIdx[c]] || '').trim(); });
-                // ข้ามแถวว่างทั้งแถว
-                if (Object.values(obj).some(v => v !== '')) rows.push(obj);
+                for (let i = 0; i < cols.length; i++) {
+                    obj[cols[i]] = (cells[i] !== undefined ? cells[i] : '');
+                }
+                if (this.tableMeta.kind === 'natural' && !obj[this.tableMeta.pk]) missingPkRows++;
+                rows.push(obj);
             }
 
-            this.parsed = { delimiter, rawHeaders, usedCols, unknownCols, missingCols, rows };
+            this.parsed = { delimiter, rows, extraCols, missingPkRows };
             this.result = null;
         },
 
