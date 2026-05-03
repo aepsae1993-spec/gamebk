@@ -20,7 +20,8 @@ lms-quest-web/
 │   ├── _lib/                  ← supabase client, auth, util
 │   └── _handlers/             ← business logic (1 ไฟล์ต่อ 1 หมวด)
 ├── public/
-│   └── index.html             ← frontend (patched serverCall())
+│   ├── index.html             ← frontend (patched serverCall())
+│   └── import.html            ← admin tool: paste จาก Sheets/Excel → Supabase
 ├── supabase/
 │   └── schema.sql             ← รันใน Supabase SQL Editor
 ├── apps-script/
@@ -128,7 +129,18 @@ npm run dev              # ใช้ vercel dev (รันที่ localhost:30
 2. นักเรียนเข้าหน้าสมัคร ใส่ `เลขประจำตัวประชาชน` ที่เพิ่มไว้ → ระบบจะ activate บัญชีให้
 
 ### 6.3 ใส่ลิงก์รูปภาพ (Drive)
-ไปที่ Supabase **Table Editor** → เลือกตาราง:
+มี 2 วิธี:
+
+**วิธี A: Bulk Import (แนะนำ — paste จาก Google Sheets ทั้งทีเดียว)**
+1. ล็อกอินเป็น Admin ที่หน้าหลัก แล้วกดไอคอน 📤 (มุมขวาบน) — หรือไปที่ `/import.html` ตรง ๆ
+2. เลือกตาราง (เช่น `pet_images`)
+3. ใน Google Sheet ของคุณ: แก้ headers แถวบนสุดให้ตรงกับชื่อคอลัมน์ที่หน้าจอแสดง (snake_case)
+4. คลุม **เฉพาะข้อมูล + headers** → Ctrl+C → Ctrl+V ลงในช่อง textarea
+5. กด *Parse / Preview* → ตรวจดูตาราง preview
+6. เลือกโหมด: `upsert` (อัปเดตตาม PK ปลอดภัยที่สุด) | `replace` (ลบทั้งหมดก่อนใส่ใหม่) | `append`
+7. กด *บันทึกลง Supabase*
+
+**วิธี B: Edit ทีละ row ใน Supabase Table Editor**
 - `pet_images` → ใส่ `stage1_url`...`stage5_url` ของแต่ละ `pet_type`
 - `equip_images` → ใส่ `image_url`
 - `material_images` → ใส่ `image_url`
@@ -173,6 +185,7 @@ npm run dev              # ใช้ vercel dev (รันที่ localhost:30
 | `createAnnouncement`, `getAnnouncements` | `_handlers/announcements.js` |
 | `getNotifications`, `markNotificationRead`, `markAllNotificationsRead`, `deleteNotification` | `_handlers/notifications.js` |
 | `getPetImagesDictionary`, `getEquipImagesDictionary`, `getMaterialImages`, `getPetConfigDictionary` | `_handlers/images.js` |
+| `getImportTables`, `bulkImportTable` | `_handlers/import.js` (Admin only) |
 
 เพิ่มฟังก์ชันใหม่:
 1. เขียน export ใน `api/_handlers/<file>.js`

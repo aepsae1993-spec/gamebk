@@ -3793,6 +3793,9 @@ get currentSoulShopItems() {
                                 </div>
                                 <div class="w-8 h-8 rounded-full bg-slate-700 border border-slate-600 flex items-center justify-center text-slate-300"><i data-lucide="user" class="w-4 h-4"></i></div>
                             </div>
+                            <a x-show="user && user.role === 'Admin'" href="/import.html" target="_blank"
+                               class="text-emerald-400 hover:text-emerald-300 hover:scale-110 transition flex items-center gap-1"
+                               title="Bulk Import (paste from Sheets)"><i data-lucide="upload" class="w-5 h-5"></i></a>
                             <div class="w-px h-6 bg-slate-700"></div>
                             <button @click="handleLogout" class="text-red-400 hover:text-red-300 hover:scale-110 transition flex items-center gap-1 group"><i data-lucide="power" class="w-5 h-5 group-hover:drop-shadow-[0_0_8px_rgba(248,113,113,0.8)]"></i></button>
                         </div>
