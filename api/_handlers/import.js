@@ -40,10 +40,10 @@ const TABLES = {
     cols: ['subject_code','subject_name','class_id','teacher_id']
   },
   users: {
-    label: 'Users (นักเรียน/ครู — แนะนำใช้สำหรับนำเข้าทะเบียนนักเรียนล่วงหน้า)',
-    pk: 'user_id', kind: 'auto',
-    // password_hash เว้นว่างได้ (นักเรียนจะลงทะเบียนเองด้วย citizen_id) — ระบบ default status='Advance' ให้ถ้าว่าง
-    cols: ['name','role','citizen_id','grade','username','email','status','password_hash']
+    label: 'Users (นักเรียน/ครู — รองรับนำเข้าจากชีทเดิม / ใส่ user_id เดิมได้)',
+    pk: 'user_id', kind: 'natural',
+    // ลำดับตามชีทเดิม: UserID, Username, Password, Role, Name, Profile(=email/ว่าง), Status, CreatedAt, CitizenID, Grade, TeacherDailyG, TeacherLastGDate
+    cols: ['user_id','username','password_hash','role','name','email','status','created_at','citizen_id','grade','teacher_daily_g','teacher_last_g_date']
   },
   assignments: {
     label: 'Assignments (ภารกิจ — สร้าง ID อัตโนมัติ)',
@@ -64,6 +64,32 @@ const TABLES = {
 
 function requireAdmin(ctx) {
   if (!ctx.user || ctx.user.role !== 'Admin') throw new Error('สิทธิ์ไม่เพียงพอ (เฉพาะ Admin)');
+}
+
+// แปลงวันที่หลายรูปแบบเป็น ISO 8601 (Postgres parse ได้)
+//   - "2026-02-21" / "2026-02-21T20:12:00Z" → ปล่อยตามเดิม
+//   - "21/2/2026, 20:12" / "21/2/2026 20:12" / "21/2/2026" → ISO
+//   - empty → null
+function parseFlexibleDate(s) {
+  if (s === undefined || s === null) return null;
+  if (typeof s !== 'string') return s;
+  s = s.trim();
+  if (!s) return null;
+  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s; // ISO already
+  const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:[,\s]+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$/);
+  if (m) {
+    const day = m[1].padStart(2, '0');
+    const mon = m[2].padStart(2, '0');
+    const year = m[3];
+    if (m[4]) {
+      const hh = m[4].padStart(2, '0');
+      const mm = m[5];
+      const ss = (m[6] || '00').padStart(2, '0');
+      return `${year}-${mon}-${day}T${hh}:${mm}:${ss}+07:00`;
+    }
+    return `${year}-${mon}-${day}`;
+  }
+  return s; // ปล่อย Postgres ลอง parse เอง
 }
 
 // คืน metadata ของตารางที่ import ได้ ให้ frontend ใช้ render dropdown
@@ -107,11 +133,27 @@ async function bulkImportTable(ctx, payload) {
 
   // ===== per-table preprocessing =====
 
-  // users: default role='Student', status='Advance' (สำหรับ flow นำเข้าทะเบียนล่วงหน้า)
+  // users: default role='Student', status='Advance' + แปลงวันที่ Thai → ISO
   if (payload.table === 'users') {
     cleaned = cleaned.map(r => {
       if (!r.role) r.role = 'Student';
       if (!r.status) r.status = 'Advance';
+      if (r.created_at) r.created_at = parseFlexibleDate(r.created_at);
+      if (r.teacher_last_g_date) r.teacher_last_g_date = parseFlexibleDate(r.teacher_last_g_date);
+      if (r.teacher_daily_g !== undefined) r.teacher_daily_g = Number(r.teacher_daily_g) || 0;
+      // ตัด field ที่เป็น null (จาก parseFlexibleDate กับค่าว่าง) ออก
+      Object.keys(r).forEach(k => { if (r[k] === null) delete r[k]; });
+      return r;
+    });
+  }
+
+  // assignments: แปลง due_date ที่อาจเป็น Thai format → ISO
+  if (payload.table === 'assignments') {
+    cleaned = cleaned.map(r => {
+      if (r.due_date) r.due_date = parseFlexibleDate(r.due_date);
+      if (r.max_score !== undefined) r.max_score = Number(r.max_score) || 0;
+      if (r.bonus_gold !== undefined) r.bonus_gold = Number(r.bonus_gold) || 0;
+      Object.keys(r).forEach(k => { if (r[k] === null) delete r[k]; });
       return r;
     });
   }
@@ -139,10 +181,15 @@ async function bulkImportTable(ctx, payload) {
 
   if (cleaned.length === 0) return fail('ข้อมูลทุกแถวว่าง — ตรวจ headers ให้ตรงกับคอลัมน์ที่อนุญาต');
 
-  // ตรวจว่า natural PK ต้องมีค่า
-  if (meta.kind === 'natural') {
+  // PK ต้องมีค่าเฉพาะเมื่อใช้ upsert (เพราะต้องใช้ระบุ conflict)
+  // append/replace → ปล่อย DB ใส่ default ให้ได้ ถ้ามี
+  if (meta.kind === 'natural' && mode === 'upsert') {
     const missing = cleaned.findIndex(r => !r[meta.pk]);
-    if (missing >= 0) return fail(`แถวที่ ${missing + 1} ขาดค่า ${meta.pk} (ต้องมีทุกแถว)`);
+    if (missing >= 0) return fail(`แถวที่ ${missing + 1} ขาดค่า ${meta.pk} (โหมด upsert ต้องมีทุกแถว)`);
+  }
+  // ถ้ามีบาง row PK ว่าง ตอน append → ลบ key ออกให้ DB default ทำงาน
+  if (meta.kind === 'natural' && mode !== 'upsert') {
+    cleaned.forEach(r => { if (!r[meta.pk]) delete r[meta.pk]; });
   }
 
   const sb = getSupabase();

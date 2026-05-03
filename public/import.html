@@ -105,8 +105,8 @@
             <div x-show="parsed && parsed.extraCols > 0" class="mb-3 p-3 rounded-lg bg-amber-900/30 border border-amber-700 text-amber-200 text-xs">
                 ⚠️ ข้อมูลที่วางมีคอลัมน์เกินจาก schema (<span x-text="parsed.extraCols"></span> คอลัมน์เกิน) — คอลัมน์ส่วนเกินจะถูกตัดทิ้ง
             </div>
-            <div x-show="parsed && parsed.missingPkRows > 0" class="mb-3 p-3 rounded-lg bg-red-900/30 border border-red-700 text-red-200 text-xs">
-                ❗ มี <span x-text="parsed.missingPkRows"></span> แถวที่ขาดค่า PK (<code x-text="tableMeta.pk"></code>) — ต้องแก้ก่อน save
+            <div x-show="parsed && parsed.missingPkRows > 0 && mode === 'upsert'" class="mb-3 p-3 rounded-lg bg-red-900/30 border border-red-700 text-red-200 text-xs">
+                ❗ มี <span x-text="parsed.missingPkRows"></span> แถวที่ขาดค่า PK (<code x-text="tableMeta.pk"></code>) — โหมด <b>upsert</b> ต้องมีทุกแถว / เลือกโหมด <b>append</b> เพื่อให้ระบบสร้าง ID ให้แทน
             </div>
 
             <!-- preview table -->
@@ -155,7 +155,7 @@
             </div>
 
             <button class="btn btn-primary"
-                    :disabled="!parsed || parsed.rows.length === 0 || isLoading || parsed.missingPkRows > 0"
+                    :disabled="!parsed || parsed.rows.length === 0 || isLoading || (mode === 'upsert' && parsed.missingPkRows > 0)"
                     @click="save()">
                 <span x-show="!isLoading">💾 บันทึกลง Supabase</span>
                 <span x-show="isLoading">กำลังบันทึก...</span>
