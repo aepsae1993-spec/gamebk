@@ -92,7 +92,7 @@
                 </button>
                 <button class="btn btn-ghost text-sm" @click="pasteText=''; parsed=null;">ล้าง</button>
                 <span x-show="parsed" class="text-xs text-slate-400 ml-2"
-                      x-text="'parse ได้ ' + parsed.rows.length + ' แถว / delimiter = ' + (parsed.delimiter==='\t'?'TAB':'COMMA')"></span>
+                      x-text="'parse ได้ ' + parsed.rows.length + ' แถว / delimiter = ' + (parsed.delimiter==='\t'?'TAB':'COMMA') + (parsed.autoSkipped ? ' / ข้าม header แถวแรกอัตโนมัติ' : '')"></span>
             </div>
         </div>
 
@@ -254,9 +254,20 @@ function importApp() {
             };
 
             let lines = text.split('\n').filter(l => l.trim().length > 0);
-            if (this.skipFirstRow && lines.length > 0) lines = lines.slice(1);
 
             const cols = this.tableMeta.cols;
+
+            // auto-detect: ถ้าแถวแรก ≥ 2 เซลล์ตรงกับชื่อคอลัมน์ (case/format-insensitive) = header → ข้าม
+            const norm = (s) => String(s||'').toLowerCase().replace(/[\s_-]+/g, '');
+            const colSet = new Set(cols.map(norm));
+            let autoSkipped = false;
+            if (lines.length > 0) {
+                const firstCells = lines[0].split(this.skipFirstRow ? '\t' : (lines[0].includes('\t') ? '\t' : ',')).map(c => norm(c));
+                const matchCount = firstCells.filter(c => c && colSet.has(c)).length;
+                if (matchCount >= 2) { lines = lines.slice(1); autoSkipped = true; }
+            }
+            if (this.skipFirstRow && !autoSkipped && lines.length > 0) lines = lines.slice(1);
+
             const rows = [];
             let extraCols = 0;
             let missingPkRows = 0;
@@ -274,7 +285,7 @@ function importApp() {
                 rows.push(obj);
             }
 
-            this.parsed = { delimiter, rows, extraCols, missingPkRows };
+            this.parsed = { delimiter, rows, extraCols, missingPkRows, autoSkipped };
             this.result = null;
         },
 

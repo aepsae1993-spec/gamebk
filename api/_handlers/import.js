@@ -69,10 +69,11 @@ function requireAdmin(ctx) {
 // แปลงวันที่หลายรูปแบบเป็น ISO 8601 (Postgres parse ได้)
 //   - "2026-02-21" / "2026-02-21T20:12:00Z" → ปล่อยตามเดิม
 //   - "21/2/2026, 20:12" / "21/2/2026 20:12" / "21/2/2026" → ISO
-//   - empty → null
+//   - parse ไม่ออก / empty → null (เพื่อให้ Postgres ใช้ default แทน error)
 function parseFlexibleDate(s) {
   if (s === undefined || s === null) return null;
-  if (typeof s !== 'string') return s;
+  if (s instanceof Date) return s.toISOString();
+  if (typeof s !== 'string') return null;
   s = s.trim();
   if (!s) return null;
   if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s; // ISO already
@@ -89,7 +90,7 @@ function parseFlexibleDate(s) {
     }
     return `${year}-${mon}-${day}`;
   }
-  return s; // ปล่อย Postgres ลอง parse เอง
+  return null; // parse ไม่ออก → ไม่ใส่ค่า ดีกว่าสร้าง error
 }
 
 // คืน metadata ของตารางที่ import ได้ ให้ frontend ใช้ render dropdown
@@ -194,6 +195,29 @@ async function bulkImportTable(ctx, payload) {
 
   const sb = getSupabase();
 
+  // === users upsert: เคลียร์ row เดิมที่ unique field (username/citizen_id) ซ้ำกับชุดใหม่ก่อน
+  // ป้องกัน upsert by user_id ชนกับ unique constraint อื่น
+  let preDeleted = 0;
+  if (payload.table === 'users' && (mode === 'upsert' || mode === 'replace')) {
+    const incomingUserIds = cleaned.map(r => r.user_id).filter(Boolean);
+    const incomingUsernames = cleaned.map(r => r.username).filter(Boolean);
+    const incomingCitizenIds = cleaned.map(r => r.citizen_id).filter(Boolean);
+
+    async function clearConflict(field, values) {
+      if (values.length === 0) return;
+      const { data: rows } = await sb.from('users').select('user_id').in(field, values);
+      const conflictIds = (rows || [])
+        .map(r => r.user_id)
+        .filter(id => !incomingUserIds.includes(id));
+      if (conflictIds.length > 0) {
+        await sb.from('users').delete().in('user_id', conflictIds);
+        preDeleted += conflictIds.length;
+      }
+    }
+    await clearConflict('username', incomingUsernames);
+    await clearConflict('citizen_id', incomingCitizenIds);
+  }
+
   // mode = replace → ลบหมดแล้วค่อย insert
   if (mode === 'replace') {
     const { error: delErr } = await sb.from(payload.table).delete().not(meta.pk, 'is', null);
@@ -209,7 +233,7 @@ async function bulkImportTable(ctx, payload) {
     if (error) return fail('Insert ล้มเหลว: ' + error.message);
   }
 
-  return ok({ count: cleaned.length, mode });
+  return ok({ count: cleaned.length, mode, preDeleted });
 }
 
 module.exports = { getImportTables, bulkImportTable };
