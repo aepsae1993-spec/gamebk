@@ -18,7 +18,9 @@ const handlers = Object.assign(
   require('./_handlers/announcements'),
   require('./_handlers/notifications'),
   require('./_handlers/images'),
-  require('./_handlers/import')
+  require('./_handlers/import'),
+  require('./_handlers/leaderboard'),
+  require('./_handlers/inventory')
 );
 
 // ฟังก์ชันที่ไม่ต้องล็อกอิน (public)

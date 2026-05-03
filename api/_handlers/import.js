@@ -59,6 +59,16 @@ const TABLES = {
     label: 'Settings (key-value — ค่า config ของระบบ)',
     pk: 'key', kind: 'natural',
     cols: ['key','value']
+  },
+  pet_stats: {
+    label: 'PetStats (สถานะเกมของนักเรียน — Phase 2)',
+    pk: 'user_id', kind: 'natural',
+    cols: ['user_id','exp_offset','current_hp','levels_lost_today','last_attacked_date','coins_spent','pet_type','shield_expiry','battle_count_today','daily_battles','last_battle_date','custom_name','active_buff','free_coins','element','daily_items','enhance_level','inventory_limit','souls','pet_aura','pet_title']
+  },
+  inventory: {
+    label: 'Inventory (กระเป๋า — Phase 2)',
+    pk: 'item_id', kind: 'natural',
+    cols: ['item_id','user_id','category','item_key','element','enhance_level','quantity','pet_exp','pet_level','is_locked','locked_reason','custom_name','pet_aura','pet_title']
   }
 };
 
@@ -182,6 +192,41 @@ async function bulkImportTable(ctx, payload) {
       if (r.due_date) r.due_date = parseFlexibleDate(r.due_date);
       if (r.max_score !== undefined) r.max_score = Number(r.max_score) || 0;
       if (r.bonus_gold !== undefined) r.bonus_gold = Number(r.bonus_gold) || 0;
+      Object.keys(r).forEach(k => { if (r[k] === null) delete r[k]; });
+      return r;
+    });
+  }
+
+  // pet_stats: แปลง dates + JSONB fields
+  if (payload.table === 'pet_stats') {
+    cleaned = cleaned.map(r => {
+      if (r.last_attacked_date) r.last_attacked_date = parseFlexibleDate(r.last_attacked_date);
+      if (r.last_battle_date) r.last_battle_date = parseFlexibleDate(r.last_battle_date);
+      // numeric coercion
+      ['exp_offset','current_hp','levels_lost_today','coins_spent','shield_expiry','battle_count_today','free_coins','enhance_level','inventory_limit','souls'].forEach(k => {
+        if (r[k] !== undefined) r[k] = Number(r[k]) || 0;
+      });
+      // JSONB
+      ['daily_battles','daily_items'].forEach(k => {
+        if (typeof r[k] === 'string') {
+          try { r[k] = JSON.parse(r[k]); } catch { r[k] = k === 'daily_battles' ? [] : {}; }
+        }
+      });
+      Object.keys(r).forEach(k => { if (r[k] === null) delete r[k]; });
+      return r;
+    });
+  }
+
+  // inventory: numeric + boolean coercion
+  if (payload.table === 'inventory') {
+    cleaned = cleaned.map(r => {
+      ['enhance_level','quantity','pet_exp','pet_level'].forEach(k => {
+        if (r[k] !== undefined) r[k] = Number(r[k]) || 0;
+      });
+      if (r.is_locked !== undefined) {
+        const v = String(r.is_locked).toLowerCase();
+        r.is_locked = (v === 'true' || v === '1' || v === 'yes');
+      }
       Object.keys(r).forEach(k => { if (r[k] === null) delete r[k]; });
       return r;
     });
