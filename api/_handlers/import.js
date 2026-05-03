@@ -30,14 +30,14 @@ const TABLES = {
     cols: ['mat_key','name','image_url']
   },
   classes: {
-    label: 'Classes (ชั้นเรียน — สร้าง ID อัตโนมัติ)',
-    pk: 'class_id', kind: 'auto',
-    cols: ['class_name','year','term']
+    label: 'Classes (ชั้นเรียน — ใส่ class_id เดิมได้)',
+    pk: 'class_id', kind: 'natural',
+    cols: ['class_id','class_name','year','term']
   },
   subjects: {
-    label: 'Subjects (รายวิชา — สร้าง ID อัตโนมัติ)',
-    pk: 'subject_id', kind: 'auto',
-    cols: ['subject_code','subject_name','class_id','teacher_id']
+    label: 'Subjects (รายวิชา — ใส่ subject_id เดิมได้)',
+    pk: 'subject_id', kind: 'natural',
+    cols: ['subject_id','subject_code','subject_name','class_id','teacher_id']
   },
   users: {
     label: 'Users (นักเรียน/ครู — รองรับนำเข้าจากชีทเดิม / ใส่ user_id เดิมได้)',
@@ -46,14 +46,14 @@ const TABLES = {
     cols: ['user_id','username','password_hash','role','name','email','status','created_at','citizen_id','grade','teacher_daily_g','teacher_last_g_date']
   },
   assignments: {
-    label: 'Assignments (ภารกิจ — สร้าง ID อัตโนมัติ)',
-    pk: 'assign_id', kind: 'auto',
-    cols: ['subject_id','title','due_date','max_score','bonus_gold']
+    label: 'Assignments (ภารกิจ — ใส่ assign_id เดิมได้)',
+    pk: 'assign_id', kind: 'natural',
+    cols: ['assign_id','subject_id','title','due_date','max_score','bonus_gold']
   },
   announcements: {
-    label: 'Announcements (ประกาศ — สร้าง ID อัตโนมัติ)',
-    pk: 'id', kind: 'auto',
-    cols: ['title','content','scope','author_id','author_name']
+    label: 'Announcements (ประกาศ — ใส่ id เดิมได้)',
+    pk: 'id', kind: 'natural',
+    cols: ['id','title','content','scope','author_id','author_name','created_at']
   },
   settings: {
     label: 'Settings (key-value — ค่า config ของระบบ)',
@@ -142,10 +142,40 @@ async function bulkImportTable(ctx, payload) {
       if (r.created_at) r.created_at = parseFlexibleDate(r.created_at);
       if (r.teacher_last_g_date) r.teacher_last_g_date = parseFlexibleDate(r.teacher_last_g_date);
       if (r.teacher_daily_g !== undefined) r.teacher_daily_g = Number(r.teacher_daily_g) || 0;
+      // citizen_id / username / user_id ตัดช่องว่างหัวท้าย เผื่อมีจาก sheet
+      if (r.citizen_id) r.citizen_id = String(r.citizen_id).trim();
+      if (r.username)   r.username   = String(r.username).trim();
+      if (r.user_id)    r.user_id    = String(r.user_id).trim();
       // ตัด field ที่เป็น null (จาก parseFlexibleDate กับค่าว่าง) ออก
       Object.keys(r).forEach(k => { if (r[k] === null) delete r[k]; });
       return r;
     });
+
+    // dedup ภายในชุดข้อมูลที่ paste มา — keep "ตัวสุดท้าย" ถ้า user_id ซ้ำ
+    const byUserId = new Map();
+    cleaned.forEach((r, i) => {
+      const k = r.user_id || ('__noid_' + i);
+      byUserId.set(k, r);
+    });
+    cleaned = Array.from(byUserId.values());
+
+    // ตรวจ duplicate ของ unique field (username, citizen_id) ภายในชุดเดียวกัน → return ทันที พร้อมบอก row ไหน
+    const seen = { username: new Map(), citizen_id: new Map() };
+    const issues = [];
+    cleaned.forEach((r, i) => {
+      ['username', 'citizen_id'].forEach(field => {
+        if (r[field]) {
+          if (seen[field].has(r[field])) {
+            issues.push(`${field} "${r[field]}" ซ้ำ (แถวที่ ${seen[field].get(r[field]) + 1} กับ ${i + 1})`);
+          } else {
+            seen[field].set(r[field], i);
+          }
+        }
+      });
+    });
+    if (issues.length > 0) {
+      return fail('ข้อมูลในชีทมีค่าซ้ำ — แก้ก่อน import:\n• ' + issues.slice(0, 10).join('\n• '));
+    }
   }
 
   // assignments: แปลง due_date ที่อาจเป็น Thai format → ISO
@@ -199,23 +229,37 @@ async function bulkImportTable(ctx, payload) {
   // ป้องกัน upsert by user_id ชนกับ unique constraint อื่น
   let preDeleted = 0;
   if (payload.table === 'users' && (mode === 'upsert' || mode === 'replace')) {
-    const incomingUserIds = cleaned.map(r => r.user_id).filter(Boolean);
+    const incomingUserIds = new Set(cleaned.map(r => r.user_id).filter(Boolean));
     const incomingUsernames = cleaned.map(r => r.username).filter(Boolean);
     const incomingCitizenIds = cleaned.map(r => r.citizen_id).filter(Boolean);
 
     async function clearConflict(field, values) {
-      if (values.length === 0) return;
-      const { data: rows } = await sb.from('users').select('user_id').in(field, values);
-      const conflictIds = (rows || [])
-        .map(r => r.user_id)
-        .filter(id => !incomingUserIds.includes(id));
-      if (conflictIds.length > 0) {
-        await sb.from('users').delete().in('user_id', conflictIds);
-        preDeleted += conflictIds.length;
+      if (values.length === 0) return null;
+      // batch ทีละ 100 ค่า ป้องกัน URL ยาวเกินสำหรับ sheet ใหญ่ ๆ
+      const all = [];
+      for (let i = 0; i < values.length; i += 100) {
+        const batch = values.slice(i, i + 100);
+        const { data: rows, error } = await sb.from('users').select('user_id, ' + field).in(field, batch);
+        if (error) return 'Query เพื่อหา conflict ล้มเหลว (' + field + '): ' + error.message;
+        all.push(...(rows || []));
       }
+      const conflictIds = all
+        .map(r => r.user_id)
+        .filter(id => !incomingUserIds.has(id));
+      if (conflictIds.length > 0) {
+        for (let i = 0; i < conflictIds.length; i += 100) {
+          const batch = conflictIds.slice(i, i + 100);
+          const { error: delErr } = await sb.from('users').delete().in('user_id', batch);
+          if (delErr) return 'ลบ row ที่ conflict (' + field + ') ล้มเหลว: ' + delErr.message;
+          preDeleted += batch.length;
+        }
+      }
+      return null;
     }
-    await clearConflict('username', incomingUsernames);
-    await clearConflict('citizen_id', incomingCitizenIds);
+    let err = await clearConflict('username', incomingUsernames);
+    if (err) return fail(err);
+    err = await clearConflict('citizen_id', incomingCitizenIds);
+    if (err) return fail(err);
   }
 
   // mode = replace → ลบหมดแล้วค่อย insert
