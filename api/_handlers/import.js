@@ -133,6 +133,7 @@ async function bulkImportTable(ctx, payload) {
   }).filter(o => Object.keys(o).length > 0);
 
   // ===== per-table preprocessing =====
+  let autoClearedDuplicates = [];
 
   // users: default role='Student', status='Advance' + แปลงวันที่ Thai → ISO
   if (payload.table === 'users') {
@@ -159,23 +160,20 @@ async function bulkImportTable(ctx, payload) {
     });
     cleaned = Array.from(byUserId.values());
 
-    // ตรวจ duplicate ของ unique field (username, citizen_id) ภายในชุดเดียวกัน → return ทันที พร้อมบอก row ไหน
+    // ตรวจ duplicate ของ unique field (username, citizen_id) — auto-clear ตัวที่ซ้ำ (เก็บอันแรก)
     const seen = { username: new Map(), citizen_id: new Map() };
-    const issues = [];
     cleaned.forEach((r, i) => {
       ['username', 'citizen_id'].forEach(field => {
         if (r[field]) {
           if (seen[field].has(r[field])) {
-            issues.push(`${field} "${r[field]}" ซ้ำ (แถวที่ ${seen[field].get(r[field]) + 1} กับ ${i + 1})`);
+            autoClearedDuplicates.push(`${field}="${r[field]}" (เคลียร์แถว ${i + 1} "${r.name || ''}", เก็บแถว ${seen[field].get(r[field]) + 1})`);
+            delete r[field];
           } else {
             seen[field].set(r[field], i);
           }
         }
       });
     });
-    if (issues.length > 0) {
-      return fail('ข้อมูลในชีทมีค่าซ้ำ — แก้ก่อน import:\n• ' + issues.slice(0, 10).join('\n• '));
-    }
   }
 
   // assignments: แปลง due_date ที่อาจเป็น Thai format → ISO
@@ -277,7 +275,12 @@ async function bulkImportTable(ctx, payload) {
     if (error) return fail('Insert ล้มเหลว: ' + error.message);
   }
 
-  return ok({ count: cleaned.length, mode, preDeleted });
+  return ok({
+    count: cleaned.length,
+    mode,
+    preDeleted,
+    autoClearedDuplicates: autoClearedDuplicates.length > 0 ? autoClearedDuplicates : undefined
+  });
 }
 
 module.exports = { getImportTables, bulkImportTable };
