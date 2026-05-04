@@ -11,7 +11,7 @@ const {
 const { hasBuff, addBuff, removeBuff, getPvpCount, setPvpCount } = require('../_lib/buff');
 const { loadAllSkillDefs, calcPassiveCombatStats, getPassiveValue } = require('../_lib/skills');
 const { _getEquipmentBonusForUser } = require('./equipment');
-const { pickEquippedPetRow } = require('../_lib/equippedPet');
+const { pickEquippedPetRow, ensureEquippedRow } = require('../_lib/equippedPet');
 
 async function loadSettings(sb) {
   const { data } = await sb.from('settings').select('key,value');
@@ -137,6 +137,10 @@ async function applyBattleDamage(ctx, targetId, baseDamage, attackerId, battleRe
   const nowMs = Date.now();
   const today = todayDate();
   const skillDefs = await loadAllSkillDefs(sb);
+
+  // auto-promote pet ที่ตรงกับ pet_stats.pet_type → category='equipped' (ครั้งเดียวต่อ user)
+  await ensureEquippedRow(sb, aid);
+  await ensureEquippedRow(sb, targetId);
 
   // load both (with skills + equipment)
   const A = await loadPlayer(sb, aid, skillDefs);

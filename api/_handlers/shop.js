@@ -10,7 +10,7 @@ const {
 } = require('../_lib/pet');
 const { addBuff, getPvpCount, setPvpCount } = require('../_lib/buff');
 const { loadAllSkillDefs, rollRandomSkill } = require('../_lib/skills');
-const { pickEquippedPetRow } = require('../_lib/equippedPet');
+const { pickEquippedPetRow, ensureEquippedRow } = require('../_lib/equippedPet');
 
 const ELEMENTS = ['fire','water','wind','earth','light','dark','normal'];
 const PVP_ITEMS = ['extra_battle','rematch_ticket','auto_win'];
@@ -325,6 +325,9 @@ async function confirmGachaResult(ctx, userId, keptPetsArray, soulsGained) {
   if (Number(soulsGained) > 0) {
     await sb.from('pet_stats').update({ souls: newSouls }).eq('user_id', uid);
   }
+
+  // 3. ถ้า user ยังไม่มี equipped row → promote ตัวที่เพิ่งเพิ่มเข้ามาเป็น equipped
+  await ensureEquippedRow(sb, uid);
 
   return ok({ message: 'บันทึกสัตว์เลี้ยงและเศษวิญญาณเรียบร้อย!', newSouls });
 }
