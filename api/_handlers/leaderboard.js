@@ -8,6 +8,7 @@ const {
   calculatePetLevelFromExp, calcUserBaseFromSubmissions, calcEnhanceHpBonus
 } = require('../_lib/pet');
 const { loadAllSkillDefs, calcPassiveCombatStats } = require('../_lib/skills');
+const { pickEquippedPetRow } = require('../_lib/equippedPet');
 
 function safeStr(v) { return v === null || v === undefined ? '' : String(v); }
 
@@ -142,9 +143,13 @@ async function getLeaderboardData() {
     if (ps.pet_aura) hpBonus += (Number(settings.enhance_15_aura_hp_buff) || 5) / 100;
     if (ps.pet_title) hpBonus += (Number(settings.enhance_20_title_hp_buff) || 10) / 100;
 
-    // pet level + skills จาก equipped capsule
+    // pet level + skills จาก equipped capsule (priority: equipped > matching petType > first pets)
     let equippedPetLevel = 1, equippedPetExp = 0, equippedPetMaxExp = 1000;
-    let eqInv = inv.find(i => i.category === 'equipped') || inv.find(i => i.category === 'pets');
+    let eqInv = pickEquippedPetRow(inv.map(i => ({ ...i, item_key: i.type, item_id: i.id })), ps);
+    if (eqInv) {
+      // map กลับ: ใช้ id ไปหา object เดิม (เพราะ inv มี structure ต่างจาก DB row)
+      eqInv = inv.find(it => it.id === eqInv.item_id);
+    }
     let equippedSkills = [];
     if (eqInv) {
       const calc = calculatePetLevelFromExp(eqInv.petExp || 0);

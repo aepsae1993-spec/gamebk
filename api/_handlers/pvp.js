@@ -11,6 +11,7 @@ const {
 const { hasBuff, addBuff, removeBuff, getPvpCount, setPvpCount } = require('../_lib/buff');
 const { loadAllSkillDefs, calcPassiveCombatStats, getPassiveValue } = require('../_lib/skills');
 const { _getEquipmentBonusForUser } = require('./equipment');
+const { pickEquippedPetRow } = require('../_lib/equippedPet');
 
 async function loadSettings(sb) {
   const { data } = await sb.from('settings').select('key,value');
@@ -64,7 +65,7 @@ async function loadPlayer(sb, userId, skillDefs) {
   const { data: invItems } = await sb.from('inventory').select('item_id, category, pet_exp, pet_level, item_key, element, enhance_level')
     .eq('user_id', userId).in('category', ['equipped','pets']);
   let petLevel = 1, equippedItemId = null;
-  const eq = (invItems || []).find(i => i.category === 'equipped') || (invItems || []).find(i => i.category === 'pets');
+  const eq = pickEquippedPetRow(invItems, ps);
   if (eq) {
     const calc = calculatePetLevelFromExp(eq.pet_exp || 0);
     petLevel = calc.petLevel;

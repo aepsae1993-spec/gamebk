@@ -10,6 +10,7 @@ const {
 } = require('../_lib/pet');
 const { addBuff, getPvpCount, setPvpCount } = require('../_lib/buff');
 const { loadAllSkillDefs, rollRandomSkill } = require('../_lib/skills');
+const { pickEquippedPetRow } = require('../_lib/equippedPet');
 
 const ELEMENTS = ['fire','water','wind','earth','light','dark','normal'];
 const PVP_ITEMS = ['extra_battle','rematch_ticket','auto_win'];
@@ -41,13 +42,13 @@ async function calcCurrentGold(sb, userId, ps) {
   return Math.max(0, base.coins + (Number(ps.free_coins) || 0) - (Number(ps.coins_spent) || 0));
 }
 
-// คำนวณ maxHp แบบ simplified (Phase 2B — ยังไม่รวม skill/guild/equip)
+// คำนวณ maxHp แบบ simplified
 async function calcMaxHpSimple(sb, userId, ps, settings) {
-  // หา equipped pet level
-  const { data: invItems } = await sb.from('inventory').select('category,pet_exp,pet_level')
+  // หา equipped pet level (priority ตาม pickEquippedPetRow)
+  const { data: invItems } = await sb.from('inventory').select('item_id, item_key, category,pet_exp,pet_level')
     .eq('user_id', userId).in('category', ['equipped','pets']);
   let petLevel = 1;
-  const eq = (invItems || []).find(i => i.category === 'equipped') || (invItems || []).find(i => i.category === 'pets');
+  const eq = pickEquippedPetRow(invItems, ps);
   if (eq) petLevel = calculatePetLevelFromExp(eq.pet_exp || 0).petLevel;
 
   let bonus = calcEnhanceHpBonus(Number(ps.enhance_level) || 0);
