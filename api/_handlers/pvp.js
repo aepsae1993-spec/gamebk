@@ -9,6 +9,8 @@ const {
   calculatePetLevelFromExp, calcEnhanceHpBonus
 } = require('../_lib/pet');
 const { hasBuff, addBuff, removeBuff, getPvpCount, setPvpCount } = require('../_lib/buff');
+const { loadAllSkillDefs, calcPassiveCombatStats, getPassiveValue } = require('../_lib/skills');
+const { _getEquipmentBonusForUser } = require('./equipment');
 
 async function loadSettings(sb) {
   const { data } = await sb.from('settings').select('key,value');
@@ -53,13 +55,12 @@ function elementMultiplier(a, t) {
   return 1.0;
 }
 
-// load player snapshot — รวม pet_stats + base exp + equipped pet level
-async function loadPlayer(sb, userId) {
+// load player snapshot — รวม pet_stats + base exp + equipped pet level + skills + equipment
+async function loadPlayer(sb, userId, skillDefs) {
   const ps = await getOrCreatePetStats(sb, userId);
   const { data: subs } = await sb.from('submissions').select('score').eq('student_id', userId);
   const base = calcUserBaseFromSubmissions(subs || []);
 
-  // หา equipped pet level (จาก inventory)
   const { data: invItems } = await sb.from('inventory').select('item_id, category, pet_exp, pet_level, item_key, element, enhance_level')
     .eq('user_id', userId).in('category', ['equipped','pets']);
   let petLevel = 1, equippedItemId = null;
@@ -70,7 +71,19 @@ async function loadPlayer(sb, userId) {
     equippedItemId = eq.item_id;
   }
   const playerLevel = calculateLevelAndExp(base.exp + (Number(ps.exp_offset) || 0)).level;
-  return { ps, base, petLevel, playerLevel, equippedItemId };
+
+  // skills ของ equipped pet
+  let equippedSkills = [];
+  if (equippedItemId) {
+    const { data: ls } = await sb.from('pet_learned_skills').select('skill_id').eq('pet_item_id', equippedItemId);
+    const ids = (ls || []).map(r => r.skill_id);
+    equippedSkills = (skillDefs || []).filter(s => ids.includes(s.id));
+  }
+
+  // equipment bonus
+  const equipBonus = await _getEquipmentBonusForUser(sb, userId);
+
+  return { ps, base, petLevel, playerLevel, equippedItemId, equippedSkills, equipBonus };
 }
 
 // reset daily counters ถ้าวันเปลี่ยน
@@ -85,21 +98,23 @@ function rollDailyState(ps) {
   return { lostToday, bCount, dailyBattles, dailyItems };
 }
 
-// คำนวณ HP max แบบ simple
-async function calcHpStat(sb, ps, settings, petLevel) {
+// คำนวณ HP max รวม skill+equipment bonus
+function calcHpStat(ps, settings, petLevel, skillStats, equipBonus) {
   let bonus = calcEnhanceHpBonus(Number(ps.enhance_level) || 0);
   if (ps.pet_aura) bonus += (Number(settings.enhance_15_aura_hp_buff) || 5) / 100;
   if (ps.pet_title) bonus += (Number(settings.enhance_20_title_hp_buff) || 10) / 100;
-  return Math.floor(calculateMaxHp(petLevel) * (1 + bonus));
+  bonus += (skillStats.hpBoostPct || 0) / 100;
+  return Math.floor(calculateMaxHp(petLevel) * (1 + bonus)) + (equipBonus.hp || 0);
 }
 
-async function calcAtkStat(sb, ps, settings, petLevel, playerLevel) {
-  let bonus = calcEnhanceHpBonus(Number(ps.enhance_level) || 0); // (เดิมใช้สูตรเดียวกัน)
+async function calcAtkStat(sb, ps, settings, petLevel, _playerLevel, skillStats, equipBonus) {
+  let bonus = calcEnhanceHpBonus(Number(ps.enhance_level) || 0);
   if (ps.pet_aura) bonus += (Number(settings.enhance_15_aura_atk_buff) || 5) / 100;
   if (ps.pet_title) bonus += (Number(settings.enhance_20_title_atk_buff) || 10) / 100;
+  bonus += (skillStats.atkBoostPct || 0) / 100;
   const rarity = await getPetRarity(sb, ps.pet_type || 'dog');
   const baseAtk = baseAtkFromRarity(rarity) + petLevel * 5;
-  return Math.floor(baseAtk * (1 + bonus));
+  return Math.floor(baseAtk * (1 + bonus)) + (equipBonus.atk || 0);
 }
 
 async function notify(sb, userId, type, message) {
@@ -120,10 +135,11 @@ async function applyBattleDamage(ctx, targetId, baseDamage, attackerId, battleRe
   const settings = await loadSettings(sb);
   const nowMs = Date.now();
   const today = todayDate();
+  const skillDefs = await loadAllSkillDefs(sb);
 
-  // load both
-  const A = await loadPlayer(sb, aid);
-  const T = await loadPlayer(sb, targetId);
+  // load both (with skills + equipment)
+  const A = await loadPlayer(sb, aid, skillDefs);
+  const T = await loadPlayer(sb, targetId, skillDefs);
 
   // mutable state
   let aActive = A.ps.active_buff || '';
@@ -158,16 +174,25 @@ async function applyBattleDamage(ctx, targetId, baseDamage, attackerId, battleRe
     if (c > 0) aActive = setPvpCount(aActive, 'extra_battle', c - 1);
   }
 
-  // calc stats
-  const aMaxHp = await calcHpStat(sb, A.ps, settings, A.petLevel);
-  const tMaxHp = await calcHpStat(sb, T.ps, settings, T.petLevel);
+  // calc stats (skills + equipment integrated)
+  const aSkillStats = calcPassiveCombatStats(A.equippedSkills, aDaily.bCount);
+  const tSkillStats = calcPassiveCombatStats(T.equippedSkills, tDaily.bCount);
+
+  const aMaxHp = calcHpStat(A.ps, settings, A.petLevel, aSkillStats, A.equipBonus);
+  const tMaxHp = calcHpStat(T.ps, settings, T.petLevel, tSkillStats, T.equipBonus);
   if (aHp <= 0 || aHp > aMaxHp) aHp = aMaxHp;
   if (tHp <= 0 || tHp > tMaxHp) tHp = tMaxHp;
 
-  let attackerATK = await calcAtkStat(sb, A.ps, settings, A.petLevel, A.playerLevel);
-  let counterATK = await calcAtkStat(sb, T.ps, settings, T.petLevel, T.playerLevel);
+  let attackerATK = await calcAtkStat(sb, A.ps, settings, A.petLevel, A.playerLevel, aSkillStats, A.equipBonus);
+  let counterATK = await calcAtkStat(sb, T.ps, settings, T.petLevel, T.playerLevel, tSkillStats, T.equipBonus);
   attackerATK += A.playerLevel * 10;
   counterATK += T.playerLevel * 10;
+
+  // ลด damage จาก DEF (skill + equipment) — สูตร RPG: dmg × (1 - def/(def+100))
+  const aDef = (aSkillStats.def || 0) + (A.equipBonus.def || 0);
+  const tDef = (tSkillStats.def || 0) + (T.equipBonus.def || 0) - (A.equipBonus.armorPen || 0);
+  const aDefReduction = Math.max(0, aDef) / (Math.max(0, aDef) + 100);
+  const tDefReduction = Math.max(0, tDef) / (Math.max(0, tDef) + 100);
 
   // element multiplier
   const elemA = elementMultiplier(A.ps.element || 'normal', T.ps.element || 'normal');
@@ -228,15 +253,38 @@ async function applyBattleDamage(ctx, targetId, baseDamage, attackerId, battleRe
       targetTook = dmg;
     }
 
+    // apply target DEF reduction
+    if (targetTook > 0) {
+      targetTook = Math.max(1, Math.floor(targetTook * (1 - tDefReduction)));
+      if (tDef > 0) msg += `🛡️ DEF ศัตรู ${tDef} ลดดาเมจ ${Math.floor(tDefReduction*100)}% `;
+    }
+
     if (targetTook > 0) {
       const goldReward = Number(settings.pvp_reward_gold) || 1000;
       pvpGoldEarned = goldReward;
       aFreeCoins += pvpGoldEarned;
       msg += ` 🏆 ได้รับ ${pvpGoldEarned} G! `;
 
-      // counter-attack จากฝ่ายที่โดน
-      attackerTook += counterATK;
-      msg += `⚔️ ศัตรูโจมตีโต้กลับ ${counterATK} DMG! `;
+      // counter-attack จากฝ่ายที่โดน (apply attacker DEF reduction)
+      const counterDmg = Math.max(1, Math.floor(counterATK * (1 - aDefReduction)));
+      attackerTook += counterDmg;
+      msg += `⚔️ ศัตรูโจมตีโต้กลับ ${counterDmg} DMG! `;
+
+      // lifesteal — heal attacker
+      const lifeStealPct = (getPassiveValue(A.equippedSkills, 'lifeSteal', aDaily.bCount) || 0) + (A.equipBonus.lifesteal || 0);
+      if (lifeStealPct > 0) {
+        const heal = Math.floor(targetTook * lifeStealPct / 100);
+        aHp = Math.min(aMaxHp, aHp + heal);
+        if (heal > 0) msg += `🧛 ดูดเลือด +${heal} HP! `;
+      }
+
+      // thorns — sacrificial reflect from target
+      const tThorns = getPassiveValue(T.equippedSkills, 'thorns', tDaily.bCount) || 0;
+      if (tThorns > 0) {
+        const thornsDmg = Math.floor(targetTook * tThorns / 100);
+        attackerTook += thornsDmg;
+        msg += `🌿 หนามศัตรูสะท้อนดาเมจ ${thornsDmg}! `;
+      }
     }
   } else if (result === 'lose' || result === 'draw') {
     if (hasBuff(aActive, 'berserk')) {
@@ -283,7 +331,7 @@ async function applyBattleDamage(ctx, targetId, baseDamage, attackerId, battleRe
     }
   }
 
-  // PvP EXP rewards (simplified — เก็บไว้เป็น offset ของ player)
+  // ===== PvP Player EXP (offset) =====
   const pvpExpWin = Number(settings.player_exp_pvp_win) || 500;
   const pvpExpLose = Number(settings.player_exp_pvp_lose) || 200;
   const pvpExpDraw = Number(settings.player_exp_pvp_draw) || 300;
@@ -292,6 +340,24 @@ async function applyBattleDamage(ctx, targetId, baseDamage, attackerId, battleRe
   aOffset += aPlayerExp;
   tOffset += tPlayerExp;
   msg += ` 👤 +${aPlayerExp} Player EXP `;
+
+  // ===== PvP Pet EXP (เพิ่มที่ equipped capsule) =====
+  const petExpWin = Number(settings.pet_exp_pvp_win) || 2000;
+  const petExpLose = Number(settings.pet_exp_pvp_lose) || 1000;
+  const petExpDraw = Number(settings.pet_exp_pvp_draw) || 1500;
+  const aPetExp = result === 'win' ? petExpWin : (result === 'lose' ? petExpLose : petExpDraw);
+  const tPetExp = result === 'win' ? petExpLose : (result === 'lose' ? petExpWin : petExpDraw);
+  if (A.equippedItemId && aPetExp > 0) {
+    const { data: aInv } = await sb.from('inventory').select('pet_exp').eq('item_id', A.equippedItemId).maybeSingle();
+    const newExp = (Number(aInv && aInv.pet_exp) || 0) + aPetExp;
+    await sb.from('inventory').update({ pet_exp: newExp }).eq('item_id', A.equippedItemId);
+    msg += ` 🐾 +${aPetExp} Pet EXP `;
+  }
+  if (T.equippedItemId && tPetExp > 0) {
+    const { data: tInv } = await sb.from('inventory').select('pet_exp').eq('item_id', T.equippedItemId).maybeSingle();
+    const newExp = (Number(tInv && tInv.pet_exp) || 0) + tPetExp;
+    await sb.from('inventory').update({ pet_exp: newExp }).eq('item_id', T.equippedItemId);
+  }
 
   // Track pvpWins ใน daily_items
   if (result === 'win') aDaily.dailyItems.pvpWins = (Number(aDaily.dailyItems.pvpWins) || 0) + 1;

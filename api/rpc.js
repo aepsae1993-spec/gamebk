@@ -23,7 +23,10 @@ const handlers = Object.assign(
   require('./_handlers/inventory'),
   require('./_handlers/shop'),
   require('./_handlers/rewards'),
-  require('./_handlers/pvp')
+  require('./_handlers/pvp'),
+  require('./_handlers/skills'),
+  require('./_handlers/enhance'),
+  require('./_handlers/equipment')
 );
 
 // ฟังก์ชันที่ไม่ต้องล็อกอิน (public)

@@ -9,6 +9,7 @@ const {
   calculatePetLevelFromExp, calculateMaxHp, calcEnhanceHpBonus
 } = require('../_lib/pet');
 const { addBuff, getPvpCount, setPvpCount } = require('../_lib/buff');
+const { loadAllSkillDefs, rollRandomSkill } = require('../_lib/skills');
 
 const ELEMENTS = ['fire','water','wind','earth','light','dark','normal'];
 const PVP_ITEMS = ['extra_battle','rematch_ticket','auto_win'];
@@ -87,6 +88,9 @@ async function rollGacha(sb, qty, settings, useUR, ratesPayload) {
     rRare   = ratesPayload && ratesPayload.rare   !== undefined ? Number(ratesPayload.rare)   : Number(settings.rate_rare   || 20);
   }
 
+  // preload skill defs สำหรับ preview passive skill ในการ์ดกาชา
+  const skillDefs = await loadAllSkillDefs(sb);
+
   const result = [];
   for (let i = 0; i < qty; i++) {
     const roll = Math.random() * 100;
@@ -102,7 +106,14 @@ async function rollGacha(sb, qty, settings, useUR, ratesPayload) {
       else { acc += rEpic; if (roll <= acc) { rarity = 'SR'; pool = pools.SR; }
         else { acc += rRare; if (roll <= acc) { rarity = 'R'; pool = pools.R; } } }
     }
-    result.push({ type: rand(pool), element: rand(ELEMENTS), rarity, skills: [] });
+    // สุ่มสกิล passive 1 ตัว — preview ในการ์ด
+    const previewSkill = rollRandomSkill(skillDefs, 'passive', settings);
+    const skillInfo = previewSkill ? [{
+      skillId: previewSkill.id, name: previewSkill.name,
+      type: 'passive', effect: previewSkill.effect, value: previewSkill.value,
+      description: previewSkill.description
+    }] : [];
+    result.push({ type: rand(pool), element: rand(ELEMENTS), rarity, skills: skillInfo });
   }
   return result;
 }
@@ -280,15 +291,32 @@ async function confirmGachaResult(ctx, userId, keptPetsArray, soulsGained) {
     return fail(`กระเป๋าเต็ม! (มีที่ว่าง ${limit - (petCount || 0)} ช่อง)`);
   }
 
-  // 1. เพิ่ม pets
+  // 1. เพิ่ม pets + assign preview skill ที่ roll ไว้
   if (kept.length > 0) {
     const rows = kept.map(p => ({
       user_id: uid, category: 'pets',
       item_key: p.type, element: p.element || 'normal',
       enhance_level: 0, quantity: 1
     }));
-    await sb.from('inventory').insert(rows);
-    // TODO Phase 2C: assign rolled passive skill
+    const { data: inserted } = await sb.from('inventory').insert(rows).select('item_id');
+    if (inserted) {
+      const learned = [];
+      for (let i = 0; i < kept.length && i < inserted.length; i++) {
+        const sk = (kept[i].skills && kept[i].skills.length > 0) ? kept[i].skills[0] : null;
+        if (sk && sk.skillId) {
+          learned.push({
+            pet_item_id: inserted[i].item_id,
+            owner_user_id: uid,
+            skill_id: sk.skillId,
+            skill_type: sk.type || 'passive',
+            source: 'gacha'
+          });
+        }
+      }
+      if (learned.length > 0) {
+        try { await sb.from('pet_learned_skills').insert(learned); } catch(e) { /* silent */ }
+      }
+    }
   }
 
   // 2. เพิ่ม souls จากการย่อย

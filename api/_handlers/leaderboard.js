@@ -7,6 +7,7 @@ const {
   calculateLevelAndExp, calculateMaxHp,
   calculatePetLevelFromExp, calcUserBaseFromSubmissions, calcEnhanceHpBonus
 } = require('../_lib/pet');
+const { loadAllSkillDefs, calcPassiveCombatStats } = require('../_lib/skills');
 
 function safeStr(v) { return v === null || v === undefined ? '' : String(v); }
 
@@ -34,12 +35,18 @@ async function getLeaderboardData() {
   const sb = getSupabase();
 
   // load all data in parallel
-  const [usersRes, petStatsRes, inventoryRes, submissionsRes, settings] = await Promise.all([
+  const [usersRes, petStatsRes, inventoryRes, submissionsRes, settings, skillDefs, learnedSkillsRes, equippedEqRes] = await Promise.all([
     sb.from('users').select('user_id, name, grade, role').eq('role', 'Student'),
     sb.from('pet_stats').select('*'),
     sb.from('inventory').select('*'),
     sb.from('submissions').select('student_id, score'),
-    loadGameSettings(sb)
+    loadGameSettings(sb),
+    loadAllSkillDefs(sb),
+    sb.from('pet_learned_skills').select('*'),
+    sb.from('pet_equipment').select(`
+      user_id, slot,
+      equip_inventory ( equipment_config ( atk_bonus, hp_bonus, def_bonus, spd_bonus, lifesteal_pct, reflect_pct, armor_pen ) )
+    `)
   ]);
 
   const users = usersRes.data || [];
@@ -81,6 +88,36 @@ async function getLeaderboardData() {
   const psMap = {};
   allPetStats.forEach(p => { psMap[p.user_id] = p; });
 
+  // skill def lookup
+  const skillDefMap = {};
+  (skillDefs || []).forEach(s => { skillDefMap[s.id] = s; });
+
+  // learned skills grouped by pet_item_id
+  const learnedByPet = {};
+  (learnedSkillsRes.data || []).forEach(ls => {
+    if (!learnedByPet[ls.pet_item_id]) learnedByPet[ls.pet_item_id] = [];
+    const def = skillDefMap[ls.skill_id];
+    if (def) learnedByPet[ls.pet_item_id].push(def);
+  });
+
+  // equipment bonus per user
+  const equipBonusByUser = {};
+  (equippedEqRes.data || []).forEach(r => {
+    if (!equipBonusByUser[r.user_id]) {
+      equipBonusByUser[r.user_id] = { atk: 0, hp: 0, def: 0, spd: 0, lifesteal: 0, reflect: 0, armorPen: 0 };
+    }
+    const cfg = r.equip_inventory && r.equip_inventory.equipment_config;
+    if (!cfg) return;
+    const b = equipBonusByUser[r.user_id];
+    b.atk += Number(cfg.atk_bonus) || 0;
+    b.hp  += Number(cfg.hp_bonus) || 0;
+    b.def += Number(cfg.def_bonus) || 0;
+    b.spd += Number(cfg.spd_bonus) || 0;
+    b.lifesteal += Number(cfg.lifesteal_pct) || 0;
+    b.reflect   += Number(cfg.reflect_pct) || 0;
+    b.armorPen  += Number(cfg.armor_pen) || 0;
+  });
+
   const todayStr = new Date().toISOString().substring(0, 10);
   const nowMs = Date.now();
   const result = [];
@@ -105,17 +142,32 @@ async function getLeaderboardData() {
     if (ps.pet_aura) hpBonus += (Number(settings.enhance_15_aura_hp_buff) || 5) / 100;
     if (ps.pet_title) hpBonus += (Number(settings.enhance_20_title_hp_buff) || 10) / 100;
 
-    // pet level จาก equipped capsule
+    // pet level + skills จาก equipped capsule
     let equippedPetLevel = 1, equippedPetExp = 0, equippedPetMaxExp = 1000;
     let eqInv = inv.find(i => i.category === 'equipped') || inv.find(i => i.category === 'pets');
+    let equippedSkills = [];
     if (eqInv) {
       const calc = calculatePetLevelFromExp(eqInv.petExp || 0);
       equippedPetLevel = calc.petLevel;
       equippedPetExp = calc.currentPetExp;
       equippedPetMaxExp = calc.maxPetExp;
+      equippedSkills = learnedByPet[eqInv.id] || [];
+      // เติม petSkills เข้า inv item เพื่อให้ frontend เห็น
+      eqInv.petSkills = equippedSkills.map(s => ({ skillId: s.id, name: s.name, type: s.type, effect: s.effect, value: s.value, description: s.description, cooldown: s.cooldown }));
     }
+    // เติม skills ของทุก capsule ในกระเป๋า
+    inv.forEach(it => {
+      if (it.category === 'pets' || it.category === 'equipped') {
+        const sks = learnedByPet[it.id] || [];
+        it.petSkills = sks.map(s => ({ skillId: s.id, name: s.name, type: s.type, effect: s.effect, value: s.value, description: s.description, cooldown: s.cooldown }));
+      }
+    });
 
-    const maxHp = Math.floor(calculateMaxHp(equippedPetLevel) * (1 + hpBonus));
+    // skill stats (passive)
+    const skillStats = calcPassiveCombatStats(equippedSkills, Number(ps.battle_count_today) || 0);
+    const equipBonus = equipBonusByUser[u.user_id] || { atk:0, hp:0, def:0, spd:0, lifesteal:0, reflect:0, armorPen:0 };
+
+    const maxHp = Math.floor(calculateMaxHp(equippedPetLevel) * (1 + hpBonus + skillStats.hpBoostPct/100)) + equipBonus.hp;
     const petHpRaw = Number(ps.current_hp);
     const currentHp = (!petHpRaw || petHpRaw <= 0 || petHpRaw > maxHp) ? maxHp : petHpRaw;
 
@@ -157,8 +209,8 @@ async function getLeaderboardData() {
       souls: Number(ps.souls) || 0,
       petAura: safeStr(ps.pet_aura),
       petTitle: safeStr(ps.pet_title),
-      petSkills: '[]', // Phase 2C
-      skillStats: { hpBoostPct: 0, atkBoostPct: 0, def: 0, spd: 0, guildPermAtk: 0, guildPermHp: 0 },
+      petSkills: JSON.stringify(eqInv && eqInv.petSkills ? eqInv.petSkills : []),
+      skillStats: { hpBoostPct: skillStats.hpBoostPct, atkBoostPct: skillStats.atkBoostPct, def: skillStats.def, spd: skillStats.spd, guildPermAtk: 0, guildPermHp: 0 },
       guildBuff: { atkPct: 0, hpPct: 0 },
       guildName: '',
       equippedPetLevel,
