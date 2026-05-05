@@ -57,6 +57,7 @@ async function enhancePet(ctx, userId, targetId, useProtectItemIds, useTalismanI
   } else {
     target = items.find(i => i.item_id === targetId && i.category === 'pets');
     if (!target) return fail('ไม่พบแคปซูลที่ต้องการตีบวก');
+    if (target.is_locked) return fail('🔒 สัตว์เลี้ยงนี้ถูกล็อคอยู่: ' + (target.locked_reason || 'ติดตลาด/ฟาร์ม') + ' — ยกเลิกก่อนถึงจะตีบวกได้');
     targetEnhance = Number(target.enhance_level) || 0;
     targetPetType = target.item_key || '';
   }
@@ -84,6 +85,7 @@ async function enhancePet(ctx, userId, targetId, useProtectItemIds, useTalismanI
     for (const sid of sacrificeIds) {
       const sac = items.find(i => i.item_id === sid && i.category === 'pets');
       if (!sac) return fail('ไม่พบสัตว์เลี้ยงที่ต้องการสังเวย: ' + sid);
+      if (sac.is_locked) return fail('🔒 สังเวยตัวที่ถูกล็อคไม่ได้ (ติดตลาด/ฟาร์ม): ' + (sac.locked_reason || ''));
       if (sac.item_key !== targetPetType) return fail('สัตว์เลี้ยงที่สังเวยต้องเป็นเผ่าพันธุ์เดียวกัน');
     }
   }

@@ -55,10 +55,14 @@ async function getLeaderboardData() {
   const allInventory = inventoryRes.data || [];
   const submissions = submissionsRes.data || [];
 
-  // group inventory by user_id
+  // group inventory by user_id (คำนวณ petLevel จาก pet_exp สด ๆ ไม่อ่านจาก cached column)
   const invByUser = {};
   allInventory.forEach(it => {
     if (!invByUser[it.user_id]) invByUser[it.user_id] = [];
+    const exp = Number(it.pet_exp) || 0;
+    const calc = (it.category === 'pets' || it.category === 'equipped')
+      ? calculatePetLevelFromExp(exp)
+      : { petLevel: 0, currentPetExp: 0, maxPetExp: 0 };
     invByUser[it.user_id].push({
       id: it.item_id,
       category: it.category,
@@ -67,8 +71,10 @@ async function getLeaderboardData() {
       createdAt: it.created_at ? String(it.created_at).substring(0, 10) : '',
       enhance: it.enhance_level || 0,
       amount: it.quantity || 1,
-      petExp: it.pet_exp || 0,
-      petLevel: it.pet_level || 0,
+      petExp: exp,
+      petLevel: calc.petLevel,
+      petCurrentExp: calc.currentPetExp,
+      petMaxExp: calc.maxPetExp,
       isLocked: !!it.is_locked,
       lockedReason: it.locked_reason || '',
       customName: it.custom_name || '',
