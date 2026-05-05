@@ -55,13 +55,15 @@ async function getGuildList() {
     const { data: members } = await sb.from('guild_members').select('guild_id, role').in('guild_id', ids).neq('role', 'pending');
     (members || []).forEach(m => { memberCounts[m.guild_id] = (memberCounts[m.guild_id] || 0) + 1; });
   }
+  const joinModeMap = { open: 'auto', request: 'approve', closed: 'closed' };
   return (guilds || []).map(g => {
     const lvl = calcGuildLevel(g.exp_total || 0);
     return {
       guildId: g.guild_id, name: g.name, leaderId: g.leader_id,
       funds: g.funds || 0, expTotal: g.exp_total || 0,
       level: lvl.level, currentExp: lvl.currentExp, maxExp: lvl.maxExp,
-      memberLimit: g.member_limit || 10, joinMode: g.join_mode || 'request',
+      memberLimit: g.member_limit || 10,
+      joinMode: joinModeMap[g.join_mode] || 'approve',
       memberCount: memberCounts[g.guild_id] || 0,
       createdAt: g.created_at
     };
@@ -69,38 +71,82 @@ async function getGuildList() {
 }
 
 // ============================================================
-// getMyGuild(userId)
+// getMyGuild(userId)  — return shape ตรงกับ frontend (myGuild.hasGuild, myGuild.guild.*)
 // ============================================================
 async function getMyGuild(ctx, userId) {
   const uid = userId || (ctx.user && ctx.user.userId);
-  if (!uid) return null;
+  if (!uid) return { hasGuild: false };
   const sb = getSupabase();
-  const { data: m } = await sb.from('guild_members').select('*').eq('user_id', uid).neq('role', 'pending').maybeSingle();
-  if (!m) return { inGuild: false };
 
+  // 1. หา membership ใดๆ (รวม pending)
+  const { data: anyMembership } = await sb.from('guild_members').select('*').eq('user_id', uid).maybeSingle();
+  if (!anyMembership) return { hasGuild: false, isPending: false };
+
+  if (anyMembership.role === 'pending') {
+    const { data: pendingGuild } = await sb.from('guilds').select('name').eq('guild_id', anyMembership.guild_id).maybeSingle();
+    return { hasGuild: false, isPending: true, pendingGuildName: pendingGuild ? pendingGuild.name : '' };
+  }
+
+  // 2. โหลด guild + members
+  const m = anyMembership;
   const { data: guild } = await sb.from('guilds').select('*').eq('guild_id', m.guild_id).maybeSingle();
-  if (!guild) return { inGuild: false };
+  if (!guild) return { hasGuild: false };
 
-  const { data: members } = await sb.from('guild_members').select('user_id, role, guild_points, joined_at').eq('guild_id', m.guild_id);
-  const userIds = (members || []).map(x => x.user_id);
+  const { data: allMembers } = await sb.from('guild_members')
+    .select('user_id, role, guild_points, joined_at').eq('guild_id', m.guild_id);
+  const memberIds = (allMembers || []).map(x => x.user_id);
   let nameMap = {};
-  if (userIds.length > 0) {
-    const { data: users } = await sb.from('users').select('user_id, name').in('user_id', userIds);
+  if (memberIds.length > 0) {
+    const { data: users } = await sb.from('users').select('user_id, name').in('user_id', memberIds);
     (users || []).forEach(u => { nameMap[u.user_id] = u.name; });
   }
 
   const lvl = calcGuildLevel(guild.exp_total || 0);
+  const activeMembers = (allMembers || []).filter(x => x.role !== 'pending');
+  const pendingMembers = (allMembers || []).filter(x => x.role === 'pending').map(x => ({
+    userId: x.user_id, name: nameMap[x.user_id] || '', requestedAt: x.joined_at
+  }));
+
+  // map join_mode: DB(open|request|closed) → frontend(auto|approve|closed)
+  const joinModeMap = { open: 'auto', request: 'approve', closed: 'closed' };
+
+  // chat — recent 50
+  const { data: chats } = await sb.from('guild_chat')
+    .select('*').eq('guild_id', m.guild_id).order('sent_at', { ascending: false }).limit(50);
+
+  // expand cost
+  const expandCost = (Number(guild.member_limit) || 10) * 1000;
+
   return {
-    inGuild: true,
-    guildId: guild.guild_id, name: guild.name, leaderId: guild.leader_id,
-    funds: guild.funds || 0, expTotal: guild.exp_total || 0,
-    level: lvl.level, currentExp: lvl.currentExp, maxExp: lvl.maxExp,
-    memberLimit: guild.member_limit || 10, joinMode: guild.join_mode,
-    myRole: m.role, myGuildPoints: m.guild_points || 0,
-    members: (members || []).map(x => ({
+    hasGuild: true,
+    isPending: false,
+    myRole: m.role,
+    myGuildPoints: m.guild_points || 0,
+    memberCount: activeMembers.length,
+    members: activeMembers.map(x => ({
       userId: x.user_id, name: nameMap[x.user_id] || '', role: x.role,
       guildPoints: x.guild_points || 0, joinedAt: x.joined_at
-    }))
+    })),
+    pendingMembers,
+    expandCost,
+    guildBuffs: { atkPct: 0, hpPct: 0 }, // Phase 2C ยังไม่ implement guild buff
+    chats: (chats || []).reverse().map(c => ({
+      id: c.chat_id, userId: c.user_id, userName: c.user_name,
+      message: c.message, sentAt: c.sent_at
+    })),
+    guild: {
+      guildId: guild.guild_id,
+      name: guild.name,
+      leaderId: guild.leader_id,
+      leaderName: nameMap[guild.leader_id] || '',
+      funds: Number(guild.funds) || 0,
+      expTotal: Number(guild.exp_total) || 0,
+      level: lvl.level,
+      currentExp: lvl.currentExp,
+      maxExp: lvl.maxExp,
+      memberLimit: guild.member_limit || 10,
+      joinMode: joinModeMap[guild.join_mode] || 'approve'
+    }
   };
 }
 
@@ -118,10 +164,11 @@ async function createGuild(ctx, userId, guildName) {
   const { data: existing } = await sb.from('guild_members').select('guild_id').eq('user_id', uid).neq('role', 'pending').maybeSingle();
   if (existing) return fail('คุณอยู่ในกิลด์อื่นแล้ว');
 
-  // ค่าใช้จ่าย 5000 G
+  // ค่าใช้จ่าย 50,000 G (ตาม frontend)
+  const CREATE_COST = 50000;
   const ps = await getOrCreatePetStats(sb, uid);
   const gold = await calcCurrentGold(sb, uid, ps);
-  if (gold < 5000) return fail(`Gold ไม่พอ (ต้องการ 5,000 G)`);
+  if (gold < CREATE_COST) return fail(`Gold ไม่พอ (ต้องการ ${CREATE_COST.toLocaleString()} G)`);
 
   const { data: dup } = await sb.from('guilds').select('guild_id').eq('name', name).maybeSingle();
   if (dup) return fail('มีชื่อกิลด์นี้อยู่แล้ว');
@@ -132,7 +179,7 @@ async function createGuild(ctx, userId, guildName) {
   if (error) return fail(error.message);
 
   await sb.from('pet_stats').update({
-    coins_spent: (Number(ps.coins_spent) || 0) + 5000,
+    coins_spent: (Number(ps.coins_spent) || 0) + CREATE_COST,
     updated_at: new Date().toISOString()
   }).eq('user_id', uid);
 
@@ -220,11 +267,14 @@ async function kickGuildMember(ctx, leaderId, targetId) {
 async function setGuildJoinMode(ctx, leaderId, mode) {
   if (!ctx.user) return fail('ต้องล็อกอิน');
   const lid = leaderId || ctx.user.userId;
-  if (!['open','request','closed'].includes(mode)) return fail('mode ไม่ถูกต้อง');
+  // map frontend mode (auto/approve/closed) → DB (open/request/closed)
+  const aliasMap = { auto: 'open', approve: 'request', closed: 'closed', open: 'open', request: 'request' };
+  const dbMode = aliasMap[mode];
+  if (!dbMode) return fail('mode ไม่ถูกต้อง');
   const sb = getSupabase();
   const { data: leader } = await sb.from('guild_members').select('guild_id, role').eq('user_id', lid).maybeSingle();
   if (!leader || leader.role !== 'leader') return fail('เฉพาะหัวหน้ากิลด์');
-  await sb.from('guilds').update({ join_mode: mode }).eq('guild_id', leader.guild_id);
+  await sb.from('guilds').update({ join_mode: dbMode }).eq('guild_id', leader.guild_id);
   return ok();
 }
 
