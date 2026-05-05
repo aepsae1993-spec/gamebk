@@ -5416,7 +5416,12 @@ get currentSoulShopItems() {
                                                                 <template x-if="getPetStatus(capsule.id).locked">
                                                                     <button disabled class="flex-1 bg-slate-800/50 border border-slate-700 text-slate-600 text-[9px] font-black py-1.5 rounded uppercase tracking-widest cursor-not-allowed" x-text="getPetStatus(capsule.id).label + ' อยู่'"></button>
                                                                 </template>
-                                                                <button @click="openEnhanceModal(capsule.id, capsule.enhance, capsule.type, capsule.element, capsule.petLevel || calcPetLevelFromExp(capsule.petExp || 0).petLevel)" :disabled="isLoading" class="flex-1 bg-slate-800 hover:bg-rose-600 border border-slate-600 hover:border-rose-400 text-slate-300 hover:text-white text-[9px] font-black py-1.5 rounded uppercase tracking-widest transition shadow-sm">ตีบวก</button>
+                                                                <template x-if="!getPetStatus(capsule.id).locked">
+                                                                    <button @click="openEnhanceModal(capsule.id, capsule.enhance, capsule.type, capsule.element, capsule.petLevel || calcPetLevelFromExp(capsule.petExp || 0).petLevel)" :disabled="isLoading" class="flex-1 bg-slate-800 hover:bg-rose-600 border border-slate-600 hover:border-rose-400 text-slate-300 hover:text-white text-[9px] font-black py-1.5 rounded uppercase tracking-widest transition shadow-sm">ตีบวก</button>
+                                                                </template>
+                                                                <template x-if="getPetStatus(capsule.id).locked">
+                                                                    <button disabled :title="'🔒 ' + getPetStatus(capsule.id).label + ' อยู่ — ยกเลิกก่อนถึงจะตีบวกได้'" class="flex-1 bg-slate-800/50 border border-slate-700 text-slate-600 text-[9px] font-black py-1.5 rounded uppercase tracking-widest cursor-not-allowed">🔒 ตีบวก</button>
+                                                                </template>
                                                             </div>
                                                         </div>
                                                     </template>
