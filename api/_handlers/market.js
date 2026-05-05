@@ -144,7 +144,7 @@ async function getMarketListings() {
   const sb = getSupabase();
   const { data } = await sb.from('market_listings')
     .select('*').eq('status', 'listed').order('listed_at', { ascending: false }).limit(100);
-  return (data || []).map(toClient);
+  return await mapToClientList(sb, data || []);
 }
 
 async function getMyMarketListings(ctx, userId) {
@@ -153,17 +153,81 @@ async function getMyMarketListings(ctx, userId) {
   const sb = getSupabase();
   const { data } = await sb.from('market_listings')
     .select('*').eq('seller_id', uid).order('listed_at', { ascending: false }).limit(50);
-  return (data || []).map(toClient);
+  return await mapToClientList(sb, data || []);
 }
 
-function toClient(r) {
-  return {
-    marketId: r.market_id, sellerId: r.seller_id, sellerName: r.seller_name,
-    type: r.listing_type, petItemId: r.pet_item_id, equipItemId: r.equip_item_id,
-    matKey: r.mat_key, quantity: r.quantity, price: r.price, status: r.status,
-    listedAt: r.listed_at, expiresAt: r.expires_at, soldTo: r.sold_to, soldAt: r.sold_at,
-    snapshot: r.snapshot || {}
+// แปลงเป็น shape ที่ frontend คาดหวัง (preload skills + equip + material lookup)
+async function mapToClientList(sb, rows) {
+  if (rows.length === 0) return [];
+  // preload pet skills (สำหรับ pet listings)
+  const petItemIds = rows.filter(r => r.listing_type === 'pet' && r.pet_item_id).map(r => r.pet_item_id);
+  const skillMap = {};
+  if (petItemIds.length > 0) {
+    const { data: ls } = await sb.from('pet_learned_skills')
+      .select('pet_item_id, skill_id, pet_skills(name, type, effect, value, description, cooldown)')
+      .in('pet_item_id', petItemIds);
+    (ls || []).forEach(r => {
+      if (!skillMap[r.pet_item_id]) skillMap[r.pet_item_id] = [];
+      const s = r.pet_skills;
+      if (s) skillMap[r.pet_item_id].push({
+        skillId: r.skill_id, name: s.name, type: s.type, effect: s.effect,
+        value: s.value, description: s.description, cooldown: s.cooldown
+      });
+    });
+  }
+  // preload material names
+  const matKeys = rows.filter(r => r.listing_type === 'material' && r.mat_key).map(r => r.mat_key);
+  const matNameMap = {};
+  if (matKeys.length > 0) {
+    const { data: mats } = await sb.from('material_images').select('mat_key, name').in('mat_key', matKeys);
+    (mats || []).forEach(m => { matNameMap[m.mat_key] = m.name; });
+  }
+  return rows.map(r => toClientItem(r, skillMap, matNameMap));
+}
+
+function toClientItem(r, skillMap, matNameMap) {
+  const snap = r.snapshot || {};
+  const out = {
+    listingId: r.market_id, marketId: r.market_id,
+    sellerId: r.seller_id, sellerName: r.seller_name,
+    itemType: r.listing_type, type: r.listing_type, // legacy alias
+    price: r.price, status: r.status,
+    listedAt: r.listed_at, expiresAt: r.expires_at,
+    soldTo: r.sold_to, soldAt: r.sold_at
   };
+  if (r.listing_type === 'pet') {
+    // pet level จาก pet_exp ใน snapshot
+    const petExp = Number(snap.pet_exp) || 0;
+    let petLevel = 1;
+    let exp = petExp;
+    while (petLevel < 100) {
+      const need = petLevel <= 30 ? (1000 + (petLevel - 1) * 500)
+        : petLevel <= 60 ? (1000 + 29 * 500 + (petLevel - 30) * 350)
+        : (1000 + 29 * 500 + 30 * 350 + (petLevel - 60) * 200);
+      if (exp >= need) { exp -= need; petLevel++; } else break;
+    }
+    out.petItemId = r.pet_item_id;
+    out.type = snap.item_key || 'dog';
+    out.level = petLevel;
+    out.petLevel = petLevel;
+    out.element = snap.element || 'normal';
+    out.enhance = Number(snap.enhance_level) || 0;
+    out.petAura = snap.pet_aura || '';
+    out.petTitle = snap.pet_title || '';
+    out.petSkills = JSON.stringify(skillMap[r.pet_item_id] || []);
+  } else if (r.listing_type === 'equipment') {
+    out.equipItemId = r.equip_item_id;
+    out.equipId = snap.equip_id || '';
+    out.equipName = snap.name || '';
+    out.equipSlot = snap.slot || '';
+    out.equipRarity = snap.rarity || 'C';
+    out.equipStat = ''; // Phase 2C ใช้ flat stats — ไม่มี rolled stat
+  } else if (r.listing_type === 'material') {
+    out.matKey = r.mat_key;
+    out.matName = matNameMap[r.mat_key] || r.mat_key;
+    out.matQty = r.quantity;
+  }
+  return out;
 }
 
 // ============================================================

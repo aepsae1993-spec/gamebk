@@ -49,12 +49,16 @@ async function getDailyQuests(ctx, userId) {
   const result = [];
   for (const c of cfgs || []) {
     const progress = await calcProgress(sb, uid, ps, c.progress_type, today);
+    const claimed = claimedSet.has(c.quest_id);
     result.push({
       id: c.quest_id, name: c.name, desc: c.description,
       progressType: c.progress_type, target: c.target,
+      progress, claimed, isClaimed: claimed,
+      reward: { gold: c.reward_gold || 0, exp: c.reward_exp || 0, special: '' },
+      // legacy
       rewardGold: c.reward_gold, rewardExp: c.reward_exp,
-      progress, isComplete: progress >= c.target,
-      isClaimed: claimedSet.has(c.quest_id)
+      isComplete: progress >= c.target,
+      isBonus: false
     });
   }
   return result;
