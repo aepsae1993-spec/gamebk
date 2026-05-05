@@ -183,6 +183,32 @@ async function applyBattleDamage(ctx, targetId, baseDamage, attackerId, battleRe
   const aSkillStats = calcPassiveCombatStats(A.equippedSkills, aDaily.bCount);
   const tSkillStats = calcPassiveCombatStats(T.equippedSkills, tDaily.bCount);
 
+  // ===== ACTIVE SKILLS — apply เฉพาะตอนชนะ + user เลือกใช้ =====
+  let dmgMult = 1;
+  let isThunderBolt = false;
+  let attackerATKBoost = 0; // % เพิ่ม ATK
+  let counterATKDebuff = 0; // % ลด ATK ฝ่ายตรงข้าม
+  let iceShieldReduction = 0; // % ลด counter dmg
+  let activeReflect100 = false;
+  let activeHealPct = 0;
+  let activeRevivePct = 0;
+  let activeSkillMsg = '';
+  if (_useActiveSkill) {
+    const activeSkills = (A.equippedSkills || []).filter(s => s.type === 'active');
+    for (const sk of activeSkills) {
+      // cooldown check
+      if (sk.cooldown > 0 && (aDaily.bCount % sk.cooldown !== 0)) continue;
+      if (sk.effect === 'fireStrike')  { dmgMult = sk.value / 100; activeSkillMsg += `🔥 ${sk.name} ดาเมจ ×${dmgMult}! `; }
+      else if (sk.effect === 'thunderBolt') { isThunderBolt = true; dmgMult = sk.value / 100; activeSkillMsg += `⚡ ${sk.name} ทะลุเกราะ ×${dmgMult}! `; }
+      else if (sk.effect === 'atkBoost' && sk.type === 'active') { attackerATKBoost += sk.value; activeSkillMsg += `⚔️ ${sk.name} ATK +${sk.value}%! `; }
+      else if (sk.effect === 'debuff') { counterATKDebuff += sk.value; activeSkillMsg += `☠️ ${sk.name} ลด ATK ศัตรู ${sk.value}%! `; }
+      else if (sk.effect === 'iceShield') { iceShieldReduction = sk.value / 100; activeSkillMsg += `🧊 ${sk.name} ลดดาเมจโต้ ${sk.value}%! `; }
+      else if (sk.effect === 'reflect') { activeReflect100 = true; activeSkillMsg += `🪞 ${sk.name} สะท้อน ${sk.value}%! `; }
+      else if (sk.effect === 'heal') { activeHealPct += sk.value; activeSkillMsg += `💚 ${sk.name} ฟื้น ${sk.value}% HP! `; }
+      else if (sk.effect === 'revive') { activeRevivePct = sk.value; }
+    }
+  }
+
   const aMaxHp = calcHpStat(A.ps, settings, A.petLevel, aSkillStats, A.equipBonus);
   const tMaxHp = calcHpStat(T.ps, settings, T.petLevel, tSkillStats, T.equipBonus);
   if (aHp <= 0 || aHp > aMaxHp) aHp = aMaxHp;
@@ -226,11 +252,18 @@ async function applyBattleDamage(ctx, targetId, baseDamage, attackerId, battleRe
   }
 
   if (result === 'win') {
-    let dmg = attackerATK;
+    // apply active skill: ATK boost + dmg multiplier
+    let dmg = Math.floor(attackerATK * (1 + attackerATKBoost / 100) * dmgMult);
+    if (activeSkillMsg) msg += activeSkillMsg;
     if (hasBuff(aActive, 'berserk')) {
       dmg *= 2;
       aActive = removeBuff(aActive, 'berserk');
       msg += '🔥 สถานะบ้าคลั่งทำงาน! ดาเมจ x2! ';
+    }
+    // active heal: ฟื้น HP attacker ตั้งแต่ก่อนตี
+    if (activeHealPct > 0) {
+      const heal = Math.floor(aMaxHp * activeHealPct / 100);
+      aHp = Math.min(aMaxHp, aHp + heal);
     }
     if (elemA > 1) msg += `✨ ชนะทางธาตุ! (x${elemA}) `;
     else if (elemA < 1) msg += `💦 แพ้ทางธาตุ (/2) `;
@@ -258,10 +291,12 @@ async function applyBattleDamage(ctx, targetId, baseDamage, attackerId, battleRe
       targetTook = dmg;
     }
 
-    // apply target DEF reduction
-    if (targetTook > 0) {
+    // apply target DEF reduction (skip ถ้า thunderBolt)
+    if (targetTook > 0 && !isThunderBolt) {
       targetTook = Math.max(1, Math.floor(targetTook * (1 - tDefReduction)));
       if (tDef > 0) msg += `🛡️ DEF ศัตรู ${tDef} ลดดาเมจ ${Math.floor(tDefReduction*100)}% `;
+    } else if (isThunderBolt && targetTook > 0) {
+      msg += `⚡ ทะลุเกราะ! DEF ศัตรูถูกมองข้าม `;
     }
 
     if (targetTook > 0) {
@@ -270,10 +305,17 @@ async function applyBattleDamage(ctx, targetId, baseDamage, attackerId, battleRe
       aFreeCoins += pvpGoldEarned;
       msg += ` 🏆 ได้รับ ${pvpGoldEarned} G! `;
 
-      // counter-attack จากฝ่ายที่โดน (apply attacker DEF reduction)
-      const counterDmg = Math.max(1, Math.floor(counterATK * (1 - aDefReduction)));
-      attackerTook += counterDmg;
-      msg += `⚔️ ศัตรูโจมตีโต้กลับ ${counterDmg} DMG! `;
+      // counter-attack จากฝ่ายที่โดน — ลดด้วย debuff + iceShield + DEF ของ attacker
+      let counterEffective = counterATK * (1 - counterATKDebuff / 100) * (1 - iceShieldReduction);
+      let counterDmg = Math.max(1, Math.floor(counterEffective * (1 - aDefReduction)));
+      // active reflect 100% — สะท้อนกลับศัตรู ไม่โดนเอง
+      if (activeReflect100) {
+        targetTook += counterDmg;
+        msg += `🪞 สะท้อนดาเมจโต้กลับ ${counterDmg} กลับไปที่ศัตรู! `;
+      } else {
+        attackerTook += counterDmg;
+        msg += `⚔️ ศัตรูโจมตีโต้กลับ ${counterDmg} DMG! `;
+      }
 
       // lifesteal — heal attacker
       const lifeStealPct = (getPassiveValue(A.equippedSkills, 'lifeSteal', aDaily.bCount) || 0) + (A.equipBonus.lifesteal || 0);
@@ -321,7 +363,11 @@ async function applyBattleDamage(ctx, targetId, baseDamage, attackerId, battleRe
   }
   if (attackerTook > 0) {
     aHp -= attackerTook;
-    if (aHp <= 0) {
+    // active skill revive
+    if (aHp <= 0 && activeRevivePct > 0) {
+      aHp = Math.floor(aMaxHp * activeRevivePct / 100);
+      msg += `✨ คืนชีพ! ฟื้น ${activeRevivePct}% HP `;
+    } else if (aHp <= 0) {
       aDaily.lostToday += 1;
       if (aDaily.lostToday === 2 && !hasBuff(aActive, 'semi_shield')) aActive = addBuff(aActive, 'semi_shield');
       else if (aDaily.lostToday >= 3 && aShield <= nowMs) {

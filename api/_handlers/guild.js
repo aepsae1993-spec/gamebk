@@ -1,0 +1,485 @@
+// ============================================================
+// Guild — basic (create/join/leave/chat/farm/donate/expand)
+// Guild War: stub functions ไว้ก่อน (Phase 2E)
+// ============================================================
+const { getSupabase } = require('../_lib/supabase');
+const { ok, fail } = require('../_lib/util');
+const { calcUserBaseFromSubmissions } = require('../_lib/pet');
+
+async function loadSettings(sb) {
+  const { data } = await sb.from('settings').select('key,value');
+  const m = {}; (data || []).forEach(r => { m[r.key] = r.value; });
+  return m;
+}
+
+async function getOrCreatePetStats(sb, userId) {
+  let { data: ps } = await sb.from('pet_stats').select('*').eq('user_id', userId).maybeSingle();
+  if (!ps) {
+    const { data: created } = await sb.from('pet_stats').insert({ user_id: userId }).select('*').single();
+    ps = created;
+  }
+  return ps;
+}
+
+async function calcCurrentGold(sb, userId, ps) {
+  const { data: subs } = await sb.from('submissions').select('score').eq('student_id', userId);
+  const base = calcUserBaseFromSubmissions(subs || []);
+  return Math.max(0, base.coins + (Number(ps.free_coins) || 0) - (Number(ps.coins_spent) || 0));
+}
+
+function guildExpForLevel(level) {
+  // level 1-N — สูตรง่าย ๆ: ×1.5
+  if (level <= 1) return 1000;
+  return Math.floor(1000 * Math.pow(1.5, level - 1));
+}
+
+function calcGuildLevel(totalExp) {
+  let level = 1; let exp = totalExp;
+  while (level < 50) {
+    const need = guildExpForLevel(level);
+    if (exp >= need) { exp -= need; level++; }
+    else return { level, currentExp: exp, maxExp: need };
+  }
+  return { level: 50, currentExp: exp, maxExp: guildExpForLevel(50) };
+}
+
+// ============================================================
+// getGuildList()
+// ============================================================
+async function getGuildList() {
+  const sb = getSupabase();
+  const { data: guilds } = await sb.from('guilds').select('*').order('exp_total', { ascending: false });
+  const ids = (guilds || []).map(g => g.guild_id);
+  let memberCounts = {};
+  if (ids.length > 0) {
+    const { data: members } = await sb.from('guild_members').select('guild_id, role').in('guild_id', ids).neq('role', 'pending');
+    (members || []).forEach(m => { memberCounts[m.guild_id] = (memberCounts[m.guild_id] || 0) + 1; });
+  }
+  return (guilds || []).map(g => {
+    const lvl = calcGuildLevel(g.exp_total || 0);
+    return {
+      guildId: g.guild_id, name: g.name, leaderId: g.leader_id,
+      funds: g.funds || 0, expTotal: g.exp_total || 0,
+      level: lvl.level, currentExp: lvl.currentExp, maxExp: lvl.maxExp,
+      memberLimit: g.member_limit || 10, joinMode: g.join_mode || 'request',
+      memberCount: memberCounts[g.guild_id] || 0,
+      createdAt: g.created_at
+    };
+  });
+}
+
+// ============================================================
+// getMyGuild(userId)
+// ============================================================
+async function getMyGuild(ctx, userId) {
+  const uid = userId || (ctx.user && ctx.user.userId);
+  if (!uid) return null;
+  const sb = getSupabase();
+  const { data: m } = await sb.from('guild_members').select('*').eq('user_id', uid).neq('role', 'pending').maybeSingle();
+  if (!m) return { inGuild: false };
+
+  const { data: guild } = await sb.from('guilds').select('*').eq('guild_id', m.guild_id).maybeSingle();
+  if (!guild) return { inGuild: false };
+
+  const { data: members } = await sb.from('guild_members').select('user_id, role, guild_points, joined_at').eq('guild_id', m.guild_id);
+  const userIds = (members || []).map(x => x.user_id);
+  let nameMap = {};
+  if (userIds.length > 0) {
+    const { data: users } = await sb.from('users').select('user_id, name').in('user_id', userIds);
+    (users || []).forEach(u => { nameMap[u.user_id] = u.name; });
+  }
+
+  const lvl = calcGuildLevel(guild.exp_total || 0);
+  return {
+    inGuild: true,
+    guildId: guild.guild_id, name: guild.name, leaderId: guild.leader_id,
+    funds: guild.funds || 0, expTotal: guild.exp_total || 0,
+    level: lvl.level, currentExp: lvl.currentExp, maxExp: lvl.maxExp,
+    memberLimit: guild.member_limit || 10, joinMode: guild.join_mode,
+    myRole: m.role, myGuildPoints: m.guild_points || 0,
+    members: (members || []).map(x => ({
+      userId: x.user_id, name: nameMap[x.user_id] || '', role: x.role,
+      guildPoints: x.guild_points || 0, joinedAt: x.joined_at
+    }))
+  };
+}
+
+// ============================================================
+// createGuild(userId, guildName)
+// ============================================================
+async function createGuild(ctx, userId, guildName) {
+  if (!ctx.user) return fail('ต้องล็อกอิน');
+  const uid = userId || ctx.user.userId;
+  if (ctx.user.role !== 'Admin' && uid !== ctx.user.userId) return fail('สิทธิ์ไม่เพียงพอ');
+  const name = String(guildName || '').trim();
+  if (!name || name.length < 3) return fail('ชื่อกิลด์ต้อง ≥ 3 ตัวอักษร');
+
+  const sb = getSupabase();
+  const { data: existing } = await sb.from('guild_members').select('guild_id').eq('user_id', uid).neq('role', 'pending').maybeSingle();
+  if (existing) return fail('คุณอยู่ในกิลด์อื่นแล้ว');
+
+  // ค่าใช้จ่าย 5000 G
+  const ps = await getOrCreatePetStats(sb, uid);
+  const gold = await calcCurrentGold(sb, uid, ps);
+  if (gold < 5000) return fail(`Gold ไม่พอ (ต้องการ 5,000 G)`);
+
+  const { data: dup } = await sb.from('guilds').select('guild_id').eq('name', name).maybeSingle();
+  if (dup) return fail('มีชื่อกิลด์นี้อยู่แล้ว');
+
+  const { data: g, error } = await sb.from('guilds').insert({
+    name, leader_id: uid, funds: 0, exp_total: 0, member_limit: 10
+  }).select('guild_id').single();
+  if (error) return fail(error.message);
+
+  await sb.from('pet_stats').update({
+    coins_spent: (Number(ps.coins_spent) || 0) + 5000,
+    updated_at: new Date().toISOString()
+  }).eq('user_id', uid);
+
+  await sb.from('guild_members').insert({ guild_id: g.guild_id, user_id: uid, role: 'leader' });
+
+  return ok({ message: 'สร้างกิลด์สำเร็จ!', guildId: g.guild_id });
+}
+
+// ============================================================
+// joinGuild / approve / reject / leave / kick / mode
+// ============================================================
+async function joinGuild(ctx, userId, guildId) {
+  if (!ctx.user) return fail('ต้องล็อกอิน');
+  const uid = userId || ctx.user.userId;
+  if (ctx.user.role !== 'Admin' && uid !== ctx.user.userId) return fail('สิทธิ์ไม่เพียงพอ');
+  const sb = getSupabase();
+  const { data: existing } = await sb.from('guild_members').select('guild_id, role').eq('user_id', uid).neq('role', 'pending').maybeSingle();
+  if (existing) return fail('คุณอยู่ในกิลด์อยู่แล้ว');
+
+  const { data: g } = await sb.from('guilds').select('*').eq('guild_id', guildId).maybeSingle();
+  if (!g) return fail('ไม่พบกิลด์');
+  if (g.join_mode === 'closed') return fail('กิลด์นี้ปิดรับสมาชิก');
+
+  const { count } = await sb.from('guild_members').select('*', { count: 'exact', head: true }).eq('guild_id', guildId).neq('role', 'pending');
+  if ((count || 0) >= (g.member_limit || 10)) return fail('กิลด์เต็มแล้ว');
+
+  const role = g.join_mode === 'open' ? 'member' : 'pending';
+  // ลบ pending ของ guild อื่นก่อน (รอ approve ที่เดียวเท่านั้น)
+  await sb.from('guild_members').delete().eq('user_id', uid).eq('role', 'pending');
+  const { error } = await sb.from('guild_members').insert({ guild_id: guildId, user_id: uid, role });
+  if (error) return fail(error.message);
+
+  return ok({ message: role === 'pending' ? 'ส่งคำขอเข้าร่วมแล้ว' : '✅ เข้าร่วมกิลด์สำเร็จ!', joined: role !== 'pending' });
+}
+
+async function approveGuildJoin(ctx, leaderId, targetId) {
+  if (!ctx.user) return fail('ต้องล็อกอิน');
+  const lid = leaderId || ctx.user.userId;
+  const sb = getSupabase();
+  const { data: leader } = await sb.from('guild_members').select('guild_id, role').eq('user_id', lid).maybeSingle();
+  if (!leader || (leader.role !== 'leader' && leader.role !== 'officer')) return fail('สิทธิ์ไม่เพียงพอ');
+  const { error } = await sb.from('guild_members').update({ role: 'member' })
+    .eq('user_id', targetId).eq('guild_id', leader.guild_id).eq('role', 'pending');
+  if (error) return fail(error.message);
+  return ok({ message: 'อนุมัติเรียบร้อย' });
+}
+
+async function rejectGuildJoin(ctx, leaderId, targetId) {
+  if (!ctx.user) return fail('ต้องล็อกอิน');
+  const lid = leaderId || ctx.user.userId;
+  const sb = getSupabase();
+  const { data: leader } = await sb.from('guild_members').select('guild_id, role').eq('user_id', lid).maybeSingle();
+  if (!leader || (leader.role !== 'leader' && leader.role !== 'officer')) return fail('สิทธิ์ไม่เพียงพอ');
+  await sb.from('guild_members').delete().eq('user_id', targetId).eq('guild_id', leader.guild_id).eq('role', 'pending');
+  return ok({ message: 'ปฏิเสธเรียบร้อย' });
+}
+
+async function leaveGuild(ctx, userId) {
+  if (!ctx.user) return fail('ต้องล็อกอิน');
+  const uid = userId || ctx.user.userId;
+  const sb = getSupabase();
+  const { data: m } = await sb.from('guild_members').select('guild_id, role').eq('user_id', uid).neq('role', 'pending').maybeSingle();
+  if (!m) return fail('คุณไม่ได้อยู่ในกิลด์');
+  if (m.role === 'leader') {
+    const { count } = await sb.from('guild_members').select('*', { count: 'exact', head: true }).eq('guild_id', m.guild_id).neq('role', 'pending');
+    if ((count || 0) > 1) return fail('หัวหน้ากิลด์ต้องโอนตำแหน่งหรือ kick สมาชิกก่อน');
+    // เป็นคนเดียว → ลบกิลด์ทั้งกิลด์
+    await sb.from('guilds').delete().eq('guild_id', m.guild_id);
+    return ok({ message: 'ยุบกิลด์เรียบร้อย' });
+  }
+  await sb.from('guild_members').delete().eq('user_id', uid).eq('guild_id', m.guild_id);
+  return ok({ message: 'ออกจากกิลด์เรียบร้อย' });
+}
+
+async function kickGuildMember(ctx, leaderId, targetId) {
+  if (!ctx.user) return fail('ต้องล็อกอิน');
+  const lid = leaderId || ctx.user.userId;
+  const sb = getSupabase();
+  const { data: leader } = await sb.from('guild_members').select('guild_id, role').eq('user_id', lid).maybeSingle();
+  if (!leader || leader.role !== 'leader') return fail('เฉพาะหัวหน้ากิลด์');
+  await sb.from('guild_members').delete().eq('user_id', targetId).eq('guild_id', leader.guild_id);
+  return ok({ message: 'kick สมาชิกแล้ว' });
+}
+
+async function setGuildJoinMode(ctx, leaderId, mode) {
+  if (!ctx.user) return fail('ต้องล็อกอิน');
+  const lid = leaderId || ctx.user.userId;
+  if (!['open','request','closed'].includes(mode)) return fail('mode ไม่ถูกต้อง');
+  const sb = getSupabase();
+  const { data: leader } = await sb.from('guild_members').select('guild_id, role').eq('user_id', lid).maybeSingle();
+  if (!leader || leader.role !== 'leader') return fail('เฉพาะหัวหน้ากิลด์');
+  await sb.from('guilds').update({ join_mode: mode }).eq('guild_id', leader.guild_id);
+  return ok();
+}
+
+// ============================================================
+// donateToGuild / expandGuildLimit
+// ============================================================
+async function donateToGuild(ctx, userId, amount) {
+  if (!ctx.user) return fail('ต้องล็อกอิน');
+  const uid = userId || ctx.user.userId;
+  const amt = Number(amount);
+  if (!isFinite(amt) || amt <= 0) return fail('จำนวนไม่ถูกต้อง');
+  const sb = getSupabase();
+  const { data: m } = await sb.from('guild_members').select('guild_id').eq('user_id', uid).neq('role', 'pending').maybeSingle();
+  if (!m) return fail('คุณไม่ได้อยู่ในกิลด์');
+
+  const ps = await getOrCreatePetStats(sb, uid);
+  const gold = await calcCurrentGold(sb, uid, ps);
+  if (gold < amt) return fail('Gold ไม่พอ');
+
+  await sb.from('pet_stats').update({
+    coins_spent: (Number(ps.coins_spent) || 0) + amt,
+    updated_at: new Date().toISOString()
+  }).eq('user_id', uid);
+
+  // เพิ่ม funds + exp + GP ของผู้บริจาค
+  const { data: g } = await sb.from('guilds').select('funds, exp_total').eq('guild_id', m.guild_id).maybeSingle();
+  await sb.from('guilds').update({
+    funds: (Number(g.funds) || 0) + amt,
+    exp_total: (Number(g.exp_total) || 0) + amt
+  }).eq('guild_id', m.guild_id);
+
+  const { data: mr } = await sb.from('guild_members').select('guild_points').eq('user_id', uid).eq('guild_id', m.guild_id).maybeSingle();
+  await sb.from('guild_members').update({
+    guild_points: (Number(mr && mr.guild_points) || 0) + Math.floor(amt / 10)
+  }).eq('user_id', uid).eq('guild_id', m.guild_id);
+
+  return ok({ message: `บริจาค ${amt} G สำเร็จ! ได้รับ ${Math.floor(amt/10)} GP` });
+}
+
+async function expandGuildLimit(ctx, userId) {
+  if (!ctx.user) return fail('ต้องล็อกอิน');
+  const uid = userId || ctx.user.userId;
+  const sb = getSupabase();
+  const { data: m } = await sb.from('guild_members').select('guild_id, role').eq('user_id', uid).maybeSingle();
+  if (!m || m.role !== 'leader') return fail('เฉพาะหัวหน้ากิลด์');
+  const { data: g } = await sb.from('guilds').select('funds, member_limit').eq('guild_id', m.guild_id).maybeSingle();
+  const cur = Number(g.member_limit) || 10;
+  const cost = cur * 1000; // 10×1000=10000 G
+  if (g.funds < cost) return fail(`คลังกิลด์ไม่พอ (ต้องการ ${cost} G)`);
+  if (cur >= 50) return fail('ขยายได้สูงสุด 50 คน');
+  await sb.from('guilds').update({
+    funds: g.funds - cost, member_limit: cur + 1
+  }).eq('guild_id', m.guild_id);
+  return ok({ message: `ขยายกิลด์เป็น ${cur + 1} คนแล้ว!`, newLimit: cur + 1 });
+}
+
+// ============================================================
+// Guild Chat
+// ============================================================
+async function sendGuildChat(ctx, userId, message) {
+  if (!ctx.user) return fail('ต้องล็อกอิน');
+  const uid = userId || ctx.user.userId;
+  const msg = String(message || '').trim().substring(0, 500);
+  if (!msg) return fail('ข้อความว่าง');
+  const sb = getSupabase();
+  const { data: m } = await sb.from('guild_members').select('guild_id').eq('user_id', uid).neq('role', 'pending').maybeSingle();
+  if (!m) return fail('คุณไม่ได้อยู่ในกิลด์');
+  const { error } = await sb.from('guild_chat').insert({
+    guild_id: m.guild_id, user_id: uid, user_name: ctx.user.name || '', message: msg
+  });
+  if (error) return fail(error.message);
+  return ok();
+}
+
+// ============================================================
+// Guild Ranking
+// ============================================================
+async function getGuildRanking() {
+  return getGuildList();
+}
+
+// ============================================================
+// Guild Shop (basic — cuts permanent buffs only)
+// ============================================================
+async function buyGuildShopItem(ctx, userId, itemId) {
+  if (!ctx.user) return fail('ต้องล็อกอิน');
+  const uid = userId || ctx.user.userId;
+  const sb = getSupabase();
+  const settings = await loadSettings(sb);
+  const price = Number(settings['guild_price_' + itemId]);
+  if (!isFinite(price) || price <= 0) return fail('ไอเทมไม่พร้อมขาย');
+
+  const { data: m } = await sb.from('guild_members').select('guild_id, guild_points').eq('user_id', uid).neq('role', 'pending').maybeSingle();
+  if (!m) return fail('คุณไม่ได้อยู่ในกิลด์');
+  const cur = Number(m.guild_points) || 0;
+  if (cur < price) return fail(`GP ไม่พอ! ต้องใช้ ${price} GP (มี ${cur})`);
+
+  await sb.from('guild_members').update({ guild_points: cur - price })
+    .eq('user_id', uid).eq('guild_id', m.guild_id);
+
+  // apply effect (เพิ่มเข้า activeBuff)
+  const ps = await getOrCreatePetStats(sb, uid);
+  let buff = ps.active_buff || '';
+  let effectMsg = '';
+
+  if (itemId === 'perm_atk_5')   { buff = setGuildPerm(buff, 'atk', 5); effectMsg = 'ATK +5 ถาวร'; }
+  else if (itemId === 'perm_hp_200') { buff = setGuildPerm(buff, 'hp', 200); effectMsg = 'HP +200 ถาวร'; }
+  else if (itemId === 'perm_def_3')  { buff = setGuildPerm(buff, 'def', 3); effectMsg = 'DEF +3 ถาวร'; }
+  else if (itemId === 'perm_spd_2')  { buff = setGuildPerm(buff, 'spd', 2); effectMsg = 'SPD +2 ถาวร'; }
+  else if (itemId.startsWith('mat_')) {
+    // ซื้อวัตถุดิบจาก GP
+    const { data: cm } = await sb.from('crafting_materials').select('quantity').eq('user_id', uid).eq('mat_key', itemId).maybeSingle();
+    await sb.from('crafting_materials').upsert({ user_id: uid, mat_key: itemId, quantity: (Number(cm && cm.quantity) || 0) + 1 }, { onConflict: 'user_id,mat_key' });
+    effectMsg = `ได้รับ ${itemId} ×1`;
+  } else {
+    effectMsg = 'ซื้อสำเร็จ (effect ยังไม่ implement)';
+  }
+
+  if (buff !== ps.active_buff) {
+    await sb.from('pet_stats').update({ active_buff: buff, updated_at: new Date().toISOString() }).eq('user_id', uid);
+  }
+  return ok({ message: `ซื้อ ${itemId} สำเร็จ! ${effectMsg}` });
+}
+
+function setGuildPerm(buffStr, key, value) {
+  const prefix = 'guildPerm_' + key + ':';
+  const arr = buffStr ? String(buffStr).split(',').filter(b => b && !b.startsWith(prefix)) : [];
+  arr.push(prefix + value);
+  return arr.join(',');
+}
+
+// ============================================================
+// Guild Farm — basic (slot 5 default, expand cost gold)
+// ============================================================
+async function getGuildFarmData(ctx, userId) {
+  const uid = userId || (ctx.user && ctx.user.userId);
+  if (!uid) return { slots: [], slotCount: 5 };
+  const sb = getSupabase();
+  const { data: farm } = await sb.from('guild_farm').select('*').eq('user_id', uid).order('slot_index');
+  const slots = (farm || []).map(f => ({
+    slotIndex: f.slot_index, petItemId: f.pet_item_id,
+    startedAt: f.started_at, multiplier: Number(f.farm_multiplier) || 1
+  }));
+  // slot count อ่านจาก settings (default 5)
+  const settings = await loadSettings(sb);
+  const slotCount = Number(settings['farm_slot_' + uid]) || 5;
+  return { slots, slotCount };
+}
+
+async function startFarming(ctx, userId, slotIndex, petItemId, farmMultiplier) {
+  if (!ctx.user) return fail('ต้องล็อกอิน');
+  const uid = userId || ctx.user.userId;
+  const sb = getSupabase();
+  // ตรวจ pet
+  const { data: pet } = await sb.from('inventory').select('*').eq('item_id', petItemId).eq('user_id', uid).maybeSingle();
+  if (!pet || pet.category !== 'pets') return fail('เลือกสัตว์เลี้ยงในกระเป๋า (ที่ไม่ใช่ตัวที่สวมใส่)');
+  if (pet.is_locked) return fail('สัตว์ตัวนี้ถูกล็อคอยู่');
+
+  await sb.from('inventory').update({ is_locked: true, locked_reason: 'farming' }).eq('item_id', petItemId);
+
+  const { error } = await sb.from('guild_farm').upsert({
+    user_id: uid, slot_index: Number(slotIndex) || 0,
+    pet_item_id: petItemId, started_at: new Date().toISOString(),
+    farm_multiplier: Number(farmMultiplier) || 1
+  }, { onConflict: 'user_id,slot_index' });
+  if (error) {
+    await sb.from('inventory').update({ is_locked: false, locked_reason: '' }).eq('item_id', petItemId);
+    return fail(error.message);
+  }
+  return ok({ message: 'เริ่มฟาร์มแล้ว!' });
+}
+
+async function collectFarmExp(ctx, userId, slotIndex) {
+  if (!ctx.user) return fail('ต้องล็อกอิน');
+  const uid = userId || ctx.user.userId;
+  const sb = getSupabase();
+  const { data: f } = await sb.from('guild_farm').select('*').eq('user_id', uid).eq('slot_index', Number(slotIndex) || 0).maybeSingle();
+  if (!f || !f.pet_item_id) return fail('slot นี้ไม่มี pet ฟาร์มอยู่');
+  const settings = await loadSettings(sb);
+  const expPerHour = Number(settings.farm_per_hour) || 1000;
+  const elapsedHours = (Date.now() - new Date(f.started_at).getTime()) / 3600000;
+  const exp = Math.floor(elapsedHours * expPerHour * (Number(f.farm_multiplier) || 1));
+  if (exp <= 0) return fail('ยังไม่ถึงเวลาเก็บ EXP');
+
+  // update pet exp
+  const { data: pet } = await sb.from('inventory').select('pet_exp').eq('item_id', f.pet_item_id).maybeSingle();
+  const newExp = (Number(pet && pet.pet_exp) || 0) + exp;
+  await sb.from('inventory').update({ pet_exp: newExp }).eq('item_id', f.pet_item_id);
+
+  // reset start_time
+  await sb.from('guild_farm').update({ started_at: new Date().toISOString() }).eq('user_id', uid).eq('slot_index', Number(slotIndex) || 0);
+  return ok({ message: `เก็บ EXP +${exp} สำเร็จ!`, expGained: exp });
+}
+
+async function stopFarming(ctx, userId, slotIndex) {
+  if (!ctx.user) return fail('ต้องล็อกอิน');
+  const uid = userId || ctx.user.userId;
+  const sb = getSupabase();
+  const { data: f } = await sb.from('guild_farm').select('pet_item_id').eq('user_id', uid).eq('slot_index', Number(slotIndex) || 0).maybeSingle();
+  if (f && f.pet_item_id) {
+    await sb.from('inventory').update({ is_locked: false, locked_reason: '' }).eq('item_id', f.pet_item_id);
+  }
+  await sb.from('guild_farm').delete().eq('user_id', uid).eq('slot_index', Number(slotIndex) || 0);
+  return ok({ message: 'หยุดฟาร์มแล้ว' });
+}
+
+async function buyFarmSlot(ctx, userId) {
+  if (!ctx.user) return fail('ต้องล็อกอิน');
+  const uid = userId || ctx.user.userId;
+  const sb = getSupabase();
+  const cost = 5000;
+  const ps = await getOrCreatePetStats(sb, uid);
+  const gold = await calcCurrentGold(sb, uid, ps);
+  if (gold < cost) return fail('Gold ไม่พอ');
+  await sb.from('pet_stats').update({
+    coins_spent: (Number(ps.coins_spent) || 0) + cost,
+    updated_at: new Date().toISOString()
+  }).eq('user_id', uid);
+
+  const settings = await loadSettings(sb);
+  const cur = Number(settings['farm_slot_' + uid]) || 5;
+  await sb.from('settings').upsert({ key: 'farm_slot_' + uid, value: cur + 1 }, { onConflict: 'key' });
+  return ok({ message: `ซื้อ slot สำเร็จ! ตอนนี้มี ${cur + 1} slot` });
+}
+
+// ============================================================
+// Guild War — STUB (Phase 2E)
+// ============================================================
+function _stubWar() { return { active: false, message: 'Guild War ยังไม่เปิด (Phase 2E)' }; }
+async function getGuildWarList()    { return []; }
+async function getGuildWarStatus()  { return _stubWar(); }
+async function getGuildRanking2()   { return getGuildList(); }
+async function joinGuildWar()       { return fail('Guild War ยังไม่เปิด (Phase 2E)'); }
+async function getWarBattlefield()  { return _stubWar(); }
+async function getWarBattlefieldLite() { return _stubWar(); }
+async function checkWarParticipant() { return { isParticipant: false }; }
+async function placeDefender()      { return fail('Guild War ยังไม่เปิด'); }
+async function attackDefender()     { return fail('Guild War ยังไม่เปิด'); }
+async function attackFortress()     { return fail('Guild War ยังไม่เปิด'); }
+async function useWarItem()         { return fail('Guild War ยังไม่เปิด'); }
+async function createGuildWar()     { return fail('Guild War ยังไม่เปิด'); }
+async function cancelGuildWar()     { return fail('Guild War ยังไม่เปิด'); }
+async function startGuildWar()      { return fail('Guild War ยังไม่เปิด'); }
+async function endGuildWar()        { return fail('Guild War ยังไม่เปิด'); }
+
+module.exports = {
+  // basic
+  getGuildList, getMyGuild, createGuild, joinGuild,
+  approveGuildJoin, rejectGuildJoin, leaveGuild, kickGuildMember,
+  setGuildJoinMode, donateToGuild, expandGuildLimit, sendGuildChat,
+  getGuildRanking, buyGuildShopItem,
+  // farm
+  getGuildFarmData, startFarming, collectFarmExp, stopFarming, buyFarmSlot,
+  // war (stub)
+  getGuildWarList, getGuildWarStatus, joinGuildWar, getWarBattlefield, getWarBattlefieldLite,
+  checkWarParticipant, placeDefender, attackDefender, attackFortress, useWarItem,
+  createGuildWar, cancelGuildWar, startGuildWar, endGuildWar
+};
