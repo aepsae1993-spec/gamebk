@@ -39,23 +39,40 @@ async function getDailyQuests(ctx, userId) {
   const sb = getSupabase();
   const today = todayDate();
 
-  const [{ data: cfgs }, { data: claims }, ps] = await Promise.all([
-    sb.from('daily_quest_config').select('*').eq('is_active', true).order('quest_id'),
-    sb.from('daily_quest_claims').select('quest_id').eq('user_id', uid).eq('claim_date', today),
-    getOrCreatePetStats(sb, uid)
-  ]);
-  const claimedSet = new Set((claims || []).map(c => c.quest_id));
+  // โหลด quest config ก่อน — ถ้าไม่มีเลย return ทันที
+  let cfgs = [];
+  try {
+    const r = await sb.from('daily_quest_config').select('*').eq('is_active', true).order('quest_id');
+    if (r.error) console.error('[getDailyQuests] config error:', r.error);
+    cfgs = r.data || [];
+  } catch (e) {
+    console.error('[getDailyQuests] config exception:', e);
+    return [];
+  }
+  if (cfgs.length === 0) return [];
 
+  // โหลด claims + pet_stats แบบ tolerant — ล้มเหลวก็ใส่ default ได้
+  let claims = [], ps = null;
+  try {
+    const r = await sb.from('daily_quest_claims').select('quest_id').eq('user_id', uid).eq('claim_date', today);
+    claims = r.data || [];
+  } catch (e) { console.error('[getDailyQuests] claims:', e); }
+
+  try { ps = await getOrCreatePetStats(sb, uid); }
+  catch (e) { console.error('[getDailyQuests] petStats:', e); ps = { daily_items: {} }; }
+
+  const claimedSet = new Set(claims.map(c => c.quest_id));
   const result = [];
-  for (const c of cfgs || []) {
-    const progress = await calcProgress(sb, uid, ps, c.progress_type, today);
+  for (const c of cfgs) {
+    let progress = 0;
+    try { progress = await calcProgress(sb, uid, ps, c.progress_type, today); }
+    catch (e) { console.error('[getDailyQuests] progress', c.quest_id, e); progress = 0; }
     const claimed = claimedSet.has(c.quest_id);
     result.push({
       id: c.quest_id, name: c.name, desc: c.description,
       progressType: c.progress_type, target: c.target,
       progress, claimed, isClaimed: claimed,
       reward: { gold: c.reward_gold || 0, exp: c.reward_exp || 0, special: '' },
-      // legacy
       rewardGold: c.reward_gold, rewardExp: c.reward_exp,
       isComplete: progress >= c.target,
       isBonus: false

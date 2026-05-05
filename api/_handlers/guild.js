@@ -407,21 +407,136 @@ function setGuildPerm(buffStr, key, value) {
 }
 
 // ============================================================
-// Guild Farm — basic (slot 5 default, expand cost gold)
+// Guild Farm — slot 1 default, ขยายได้ถึง 5 (ใช้เงินกิล 1,000,000 G ต่อช่อง)
 // ============================================================
+const FARM_DEFAULT_SLOTS = 1;
+const FARM_MAX_SLOTS = 5;
+const FARM_NEXT_COST = 1000000;
+const FARM_NEXT_LEVEL_REQ = 5;
+const FARM_MAX_HOURS = 8;
+
 async function getGuildFarmData(ctx, userId) {
   const uid = userId || (ctx.user && ctx.user.userId);
-  if (!uid) return { slots: [], slotCount: 5 };
+  if (!uid) return { success: true, totalSlots: FARM_DEFAULT_SLOTS, farmSlots: [], availablePets: [], boughtSlots: 0, expPerHour: 1000 };
   const sb = getSupabase();
-  const { data: farm } = await sb.from('guild_farm').select('*').eq('user_id', uid).order('slot_index');
-  const slots = (farm || []).map(f => ({
-    slotIndex: f.slot_index, petItemId: f.pet_item_id,
-    startedAt: f.started_at, multiplier: Number(f.farm_multiplier) || 1
-  }));
-  // slot count อ่านจาก settings (default 5)
+
   const settings = await loadSettings(sb);
-  const slotCount = Number(settings['farm_slot_' + uid]) || 5;
-  return { slots, slotCount };
+  const expPerHour = Number(settings.farm_per_hour) || 1000;
+  const boughtSlots = Number(settings['farm_slot_extra_' + uid]) || 0;
+  const totalSlots = Math.min(FARM_MAX_SLOTS, FARM_DEFAULT_SLOTS + boughtSlots);
+
+  // farm rows + inventory + pet_config (สำหรับ rarity)
+  const [farmRes, invRes, petCfgRes, myGuildRes] = await Promise.all([
+    sb.from('guild_farm').select('*').eq('user_id', uid).order('slot_index'),
+    sb.from('inventory').select('*').eq('user_id', uid).in('category', ['pets']),
+    sb.from('pet_config').select('pet_type, rarity'),
+    sb.from('guild_members').select('guild_id, role').eq('user_id', uid).neq('role', 'pending').maybeSingle()
+  ]);
+
+  const rarityMap = {};
+  (petCfgRes.data || []).forEach(p => { rarityMap[p.pet_type] = p.rarity; });
+
+  // คำนวณ farmSlots ที่กำลังฟาร์มอยู่
+  const farmSlots = [];
+  const occupiedPetIds = new Set();
+  for (const f of farmRes.data || []) {
+    if (!f.pet_item_id) continue;
+    occupiedPetIds.add(f.pet_item_id);
+    const pet = (invRes.data || []).find(p => p.item_id === f.pet_item_id);
+    const startMs = f.started_at ? new Date(f.started_at).getTime() : Date.now();
+    const elapsedMs = Date.now() - startMs;
+    const cappedHours = Math.min(FARM_MAX_HOURS, elapsedMs / 3600000);
+    const multi = Number(f.farm_multiplier) || 1;
+    const accruedExp = Math.floor(cappedHours * expPerHour * multi);
+    let petLevel = 1;
+    if (pet) {
+      const exp = Number(pet.pet_exp) || 0;
+      let lv = 1, e = exp;
+      while (lv < 100) {
+        const need = lv <= 30 ? (1000 + (lv - 1) * 500)
+          : lv <= 60 ? (1000 + 29 * 500 + (lv - 30) * 350)
+          : (1000 + 29 * 500 + 30 * 350 + (lv - 60) * 200);
+        if (e >= need) { e -= need; lv++; } else break;
+      }
+      petLevel = lv;
+    }
+    farmSlots.push({
+      slotIndex: f.slot_index,
+      occupied: true,
+      petItemId: f.pet_item_id,
+      type: pet ? pet.item_key : '',
+      element: pet ? pet.element : 'normal',
+      enhance: pet ? (Number(pet.enhance_level) || 0) : 0,
+      petLevel,
+      rarity: pet ? (rarityMap[pet.item_key] || 'C') : 'C',
+      startTime: f.started_at,
+      farmMultiplier: multi,
+      exp: accruedExp,
+      maxHours: FARM_MAX_HOURS
+    });
+  }
+
+  // available pets = pets ที่ไม่ได้ลงตลาด, ไม่ได้ฟาร์มอยู่, ไม่ใช่ equipped
+  const { data: marketRows } = await sb.from('market_listings')
+    .select('pet_item_id').eq('seller_id', uid).eq('status', 'listed').eq('listing_type', 'pet');
+  const onMarket = new Set((marketRows || []).map(r => r.pet_item_id));
+
+  const availablePets = (invRes.data || [])
+    .filter(p => !occupiedPetIds.has(p.item_id) && !onMarket.has(p.item_id) && !p.is_locked)
+    .map(p => {
+      const exp = Number(p.pet_exp) || 0;
+      let lv = 1, e = exp;
+      while (lv < 100) {
+        const need = lv <= 30 ? (1000 + (lv - 1) * 500)
+          : lv <= 60 ? (1000 + 29 * 500 + (lv - 30) * 350)
+          : (1000 + 29 * 500 + 30 * 350 + (lv - 60) * 200);
+        if (e >= need) { e -= need; lv++; } else break;
+      }
+      return {
+        itemId: p.item_id,
+        type: p.item_key,
+        element: p.element || 'normal',
+        enhance: Number(p.enhance_level) || 0,
+        petLevel: lv,
+        rarity: rarityMap[p.item_key] || 'C'
+      };
+    });
+
+  // farm multiplier items จาก inventory (item_key='farm_x3', 'farm_x5', 'farm_x10')
+  const farmMultiStock = { 3: 0, 5: 0, 10: 0 };
+  const { data: items } = await sb.from('inventory').select('item_key, quantity')
+    .eq('user_id', uid).eq('category', 'items').in('item_key', ['farm_x3','farm_x5','farm_x10']);
+  (items || []).forEach(i => {
+    if (i.item_key === 'farm_x3')  farmMultiStock[3]  = Number(i.quantity) || 0;
+    if (i.item_key === 'farm_x5')  farmMultiStock[5]  = Number(i.quantity) || 0;
+    if (i.item_key === 'farm_x10') farmMultiStock[10] = Number(i.quantity) || 0;
+  });
+
+  // ตรวจ: ขยาย slot ใหม่ได้มั้ย (ต้องอยู่ในกิล + กิลถึง level req + funds พอ)
+  let canBuyNextSlot = false;
+  let nextSlotCost = FARM_NEXT_COST;
+  if (myGuildRes && myGuildRes.data) {
+    const { data: g } = await sb.from('guilds').select('funds, exp_total').eq('guild_id', myGuildRes.data.guild_id).maybeSingle();
+    const lvl = calcGuildLevel(Number(g && g.exp_total) || 0);
+    canBuyNextSlot = totalSlots < FARM_MAX_SLOTS
+      && lvl.level >= FARM_NEXT_LEVEL_REQ
+      && Number(g && g.funds || 0) >= nextSlotCost;
+  }
+
+  return {
+    success: true,
+    totalSlots,
+    boughtSlots,
+    maxUnlockableSlots: FARM_MAX_SLOTS,
+    nextSlotCost,
+    nextSlotLevel: FARM_NEXT_LEVEL_REQ,
+    canBuyNextSlot,
+    hasExpBoost: false,   // Phase 2D ยังไม่มี exp boost
+    expPerHour,
+    farmSlots,
+    availablePets,
+    farmMultiStock
+  };
 }
 
 async function startFarming(ctx, userId, slotIndex, petItemId, farmMultiplier) {
@@ -455,7 +570,7 @@ async function collectFarmExp(ctx, userId, slotIndex) {
   if (!f || !f.pet_item_id) return fail('slot นี้ไม่มี pet ฟาร์มอยู่');
   const settings = await loadSettings(sb);
   const expPerHour = Number(settings.farm_per_hour) || 1000;
-  const elapsedHours = (Date.now() - new Date(f.started_at).getTime()) / 3600000;
+  const elapsedHours = Math.min(FARM_MAX_HOURS, (Date.now() - new Date(f.started_at).getTime()) / 3600000);
   const exp = Math.floor(elapsedHours * expPerHour * (Number(f.farm_multiplier) || 1));
   if (exp <= 0) return fail('ยังไม่ถึงเวลาเก็บ EXP');
 
@@ -485,19 +600,24 @@ async function buyFarmSlot(ctx, userId) {
   if (!ctx.user) return fail('ต้องล็อกอิน');
   const uid = userId || ctx.user.userId;
   const sb = getSupabase();
-  const cost = 5000;
-  const ps = await getOrCreatePetStats(sb, uid);
-  const gold = await calcCurrentGold(sb, uid, ps);
-  if (gold < cost) return fail('Gold ไม่พอ');
-  await sb.from('pet_stats').update({
-    coins_spent: (Number(ps.coins_spent) || 0) + cost,
-    updated_at: new Date().toISOString()
-  }).eq('user_id', uid);
+
+  // ต้องอยู่กิล + กิลถึง level req + funds พอ
+  const { data: m } = await sb.from('guild_members').select('guild_id, role').eq('user_id', uid).neq('role', 'pending').maybeSingle();
+  if (!m) return fail('ต้องอยู่ในกิลก่อนถึงจะขยาย farm ได้');
+  const { data: g } = await sb.from('guilds').select('funds, exp_total').eq('guild_id', m.guild_id).maybeSingle();
+  const lvl = calcGuildLevel(Number(g && g.exp_total) || 0);
+  if (lvl.level < FARM_NEXT_LEVEL_REQ) return fail(`ต้องการกิลด์เลเวล ≥ ${FARM_NEXT_LEVEL_REQ} (ปัจจุบัน Lv.${lvl.level})`);
+  if (Number(g && g.funds || 0) < FARM_NEXT_COST) return fail(`คลังกิลด์ไม่พอ (ต้องการ ${FARM_NEXT_COST.toLocaleString()} G)`);
 
   const settings = await loadSettings(sb);
-  const cur = Number(settings['farm_slot_' + uid]) || 5;
-  await sb.from('settings').upsert({ key: 'farm_slot_' + uid, value: cur + 1 }, { onConflict: 'key' });
-  return ok({ message: `ซื้อ slot สำเร็จ! ตอนนี้มี ${cur + 1} slot` });
+  const bought = Number(settings['farm_slot_extra_' + uid]) || 0;
+  if (FARM_DEFAULT_SLOTS + bought >= FARM_MAX_SLOTS) return fail(`ขยายได้สูงสุด ${FARM_MAX_SLOTS} ช่องแล้ว`);
+
+  // หักเงินกิล
+  await sb.from('guilds').update({ funds: Number(g.funds) - FARM_NEXT_COST }).eq('guild_id', m.guild_id);
+  // เพิ่ม slot
+  await sb.from('settings').upsert({ key: 'farm_slot_extra_' + uid, value: bought + 1 }, { onConflict: 'key' });
+  return ok({ message: `ขยายช่องฟาร์มสำเร็จ! ตอนนี้มี ${FARM_DEFAULT_SLOTS + bought + 1}/${FARM_MAX_SLOTS} ช่อง` });
 }
 
 // ============================================================
