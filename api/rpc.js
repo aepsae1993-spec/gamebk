@@ -30,7 +30,8 @@ const handlers = Object.assign(
   require('./_handlers/market'),
   require('./_handlers/dailyQuest'),
   require('./_handlers/boss'),
-  require('./_handlers/guild')
+  require('./_handlers/guild'),
+  require('./_handlers/guildWar')
 );
 
 // ฟังก์ชันที่ไม่ต้องล็อกอิน (public)

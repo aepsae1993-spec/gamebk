@@ -622,26 +622,6 @@ async function buyFarmSlot(ctx, userId) {
   return ok({ message: `ขยายช่องฟาร์มสำเร็จ! ตอนนี้มี ${FARM_DEFAULT_SLOTS + bought + 1}/${FARM_MAX_SLOTS} ช่อง` });
 }
 
-// ============================================================
-// Guild War — STUB (Phase 2E)
-// ============================================================
-function _stubWar() { return { active: false, message: 'Guild War ยังไม่เปิด (Phase 2E)' }; }
-async function getGuildWarList()    { return []; }
-async function getGuildWarStatus()  { return _stubWar(); }
-async function getGuildRanking2()   { return getGuildList(); }
-async function joinGuildWar()       { return fail('Guild War ยังไม่เปิด (Phase 2E)'); }
-async function getWarBattlefield()  { return _stubWar(); }
-async function getWarBattlefieldLite() { return _stubWar(); }
-async function checkWarParticipant() { return { isParticipant: false }; }
-async function placeDefender()      { return fail('Guild War ยังไม่เปิด'); }
-async function attackDefender()     { return fail('Guild War ยังไม่เปิด'); }
-async function attackFortress()     { return fail('Guild War ยังไม่เปิด'); }
-async function useWarItem()         { return fail('Guild War ยังไม่เปิด'); }
-async function createGuildWar()     { return fail('Guild War ยังไม่เปิด'); }
-async function cancelGuildWar()     { return fail('Guild War ยังไม่เปิด'); }
-async function startGuildWar()      { return fail('Guild War ยังไม่เปิด'); }
-async function endGuildWar()        { return fail('Guild War ยังไม่เปิด'); }
-
 module.exports = {
   // basic
   getGuildList, getMyGuild, createGuild, joinGuild,
@@ -649,9 +629,5 @@ module.exports = {
   setGuildJoinMode, donateToGuild, expandGuildLimit, sendGuildChat,
   getGuildRanking, buyGuildShopItem,
   // farm
-  getGuildFarmData, startFarming, collectFarmExp, stopFarming, buyFarmSlot,
-  // war (stub)
-  getGuildWarList, getGuildWarStatus, joinGuildWar, getWarBattlefield, getWarBattlefieldLite,
-  checkWarParticipant, placeDefender, attackDefender, attackFortress, useWarItem,
-  createGuildWar, cancelGuildWar, startGuildWar, endGuildWar
+  getGuildFarmData, startFarming, collectFarmExp, stopFarming, buyFarmSlot
 };
