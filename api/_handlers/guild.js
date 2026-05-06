@@ -5,6 +5,7 @@
 const { getSupabase } = require('../_lib/supabase');
 const { ok, fail } = require('../_lib/util');
 const { calcUserBaseFromSubmissions } = require('../_lib/pet');
+const { addBuff } = require('../_lib/buff');
 
 async function loadSettings(sb) {
   const { data } = await sb.from('settings').select('key,value');
@@ -357,15 +358,31 @@ async function getGuildRanking() {
 }
 
 // ============================================================
-// Guild Shop (basic — cuts permanent buffs only)
+// Guild Shop — default prices ใช้ถ้า admin ยังไม่ได้ตั้งใน settings
 // ============================================================
+const GUILD_SHOP_DEFAULT_PRICES = {
+  // war
+  fortress_heal: 50, fortress_shield: 80, war_atk_buff: 40,
+  defender_heal: 30, fortress_bomb: 100, war_rage_potion: 120,
+  // permanent buffs
+  perm_atk_5: 150, perm_hp_200: 120, perm_def_3: 130, perm_spd_2: 140, element_stone: 200,
+  // materials
+  mat_iron: 60, mat_leather: 60, mat_gem: 80, mat_fabric: 60, mat_essence: 100,
+  // farm
+  farm_exp_boost: 1000, farm_multi_3: 500, farm_multi_5: 1200, farm_multi_10: 3000
+};
+
 async function buyGuildShopItem(ctx, userId, itemId) {
   if (!ctx.user) return fail('ต้องล็อกอิน');
   const uid = userId || ctx.user.userId;
   const sb = getSupabase();
   const settings = await loadSettings(sb);
-  const price = Number(settings['guild_price_' + itemId]);
-  if (!isFinite(price) || price <= 0) return fail('ไอเทมไม่พร้อมขาย');
+  // priority: settings → default
+  const settingsPrice = Number(settings['guild_price_' + itemId]);
+  const price = isFinite(settingsPrice) && settingsPrice > 0
+    ? settingsPrice
+    : (GUILD_SHOP_DEFAULT_PRICES[itemId] || 0);
+  if (!isFinite(price) || price <= 0) return fail('ไอเทมนี้ไม่ได้ตั้งราคาในระบบ');
 
   const { data: m } = await sb.from('guild_members').select('guild_id, guild_points').eq('user_id', uid).neq('role', 'pending').maybeSingle();
   if (!m) return fail('คุณไม่ได้อยู่ในกิลด์');
@@ -380,15 +397,41 @@ async function buyGuildShopItem(ctx, userId, itemId) {
   let buff = ps.active_buff || '';
   let effectMsg = '';
 
-  if (itemId === 'perm_atk_5')   { buff = setGuildPerm(buff, 'atk', 5); effectMsg = 'ATK +5 ถาวร'; }
-  else if (itemId === 'perm_hp_200') { buff = setGuildPerm(buff, 'hp', 200); effectMsg = 'HP +200 ถาวร'; }
-  else if (itemId === 'perm_def_3')  { buff = setGuildPerm(buff, 'def', 3); effectMsg = 'DEF +3 ถาวร'; }
-  else if (itemId === 'perm_spd_2')  { buff = setGuildPerm(buff, 'spd', 2); effectMsg = 'SPD +2 ถาวร'; }
+  if (itemId === 'perm_atk_5')         { buff = addAccumPerm(buff, 'atk', 5); effectMsg = '⚔️ ATK +5 ถาวร (สะสม)'; }
+  else if (itemId === 'perm_hp_200')   { buff = addAccumPerm(buff, 'hp', 200); effectMsg = '❤️ HP +200 ถาวร (สะสม)'; }
+  else if (itemId === 'perm_def_3')    { buff = addAccumPerm(buff, 'def', 3); effectMsg = '🛡️ DEF +3 ถาวร (สะสม)'; }
+  else if (itemId === 'perm_spd_2')    { buff = addAccumPerm(buff, 'spd', 2); effectMsg = '💨 SPD +2 ถาวร (สะสม)'; }
+  else if (itemId === 'element_stone') {
+    const elements = ['fire','water','wind','earth','light','dark'];
+    const cur = ps.element || 'normal';
+    const pool = elements.filter(e => e !== cur);
+    const newE = pool[Math.floor(Math.random() * pool.length)];
+    await sb.from('pet_stats').update({ element: newE, updated_at: new Date().toISOString() }).eq('user_id', uid);
+    effectMsg = `🔮 เปลี่ยนธาตุเป็น ${newE.toUpperCase()}`;
+  }
   else if (itemId.startsWith('mat_')) {
-    // ซื้อวัตถุดิบจาก GP
     const { data: cm } = await sb.from('crafting_materials').select('quantity').eq('user_id', uid).eq('mat_key', itemId).maybeSingle();
     await sb.from('crafting_materials').upsert({ user_id: uid, mat_key: itemId, quantity: (Number(cm && cm.quantity) || 0) + 1 }, { onConflict: 'user_id,mat_key' });
-    effectMsg = `ได้รับ ${itemId} ×1`;
+    effectMsg = `📦 ได้รับ ${itemId} ×1`;
+  }
+  else if (itemId === 'farm_multi_3' || itemId === 'farm_multi_5' || itemId === 'farm_multi_10') {
+    // map farm_multi_N → inventory item_key='farm_xN'
+    const key = itemId.replace('farm_multi_', 'farm_x');
+    const { data: it } = await sb.from('inventory').select('item_id, quantity').eq('user_id', uid).eq('category', 'items').eq('item_key', key).maybeSingle();
+    if (it) await sb.from('inventory').update({ quantity: (Number(it.quantity) || 0) + 1 }).eq('item_id', it.item_id);
+    else await sb.from('inventory').insert({ user_id: uid, category: 'items', item_key: key, quantity: 1 });
+    effectMsg = `🧪 ได้รับยาคูณฟาร์ม ${key.replace('farm_', '')} ×1`;
+  }
+  else if (itemId === 'farm_exp_boost') {
+    // 24h boost — เก็บใน buff
+    const expiry = Date.now() + 24 * 60 * 60 * 1000;
+    buff = setGuildPerm(buff, 'farm_boost', expiry);
+    effectMsg = '⚡ Farm EXP x2 เปิดใช้งาน 24 ชั่วโมง';
+  }
+  else if (itemId.startsWith('fortress_') || itemId === 'war_atk_buff' || itemId === 'defender_heal' || itemId === 'war_rage_potion') {
+    // war items — เก็บไว้ใน activeBuff (ใช้ตอนสงครามจะอ่าน) — Phase 2E ยังไม่ apply effect ใน battle
+    buff = addBuff(buff, 'war_' + itemId);
+    effectMsg = `⚔️ ได้รับ ${itemId} (ใช้ตอนสงคราม)`;
   } else {
     effectMsg = 'ซื้อสำเร็จ (effect ยังไม่ implement)';
   }
@@ -404,6 +447,18 @@ function setGuildPerm(buffStr, key, value) {
   const arr = buffStr ? String(buffStr).split(',').filter(b => b && !b.startsWith(prefix)) : [];
   arr.push(prefix + value);
   return arr.join(',');
+}
+
+// สะสมค่า — perm_atk_5 ซื้อ 3 ครั้ง = +15
+function addAccumPerm(buffStr, key, addValue) {
+  const prefix = 'guildPerm_' + key + ':';
+  let curVal = 0;
+  if (buffStr) {
+    for (const b of String(buffStr).split(',')) {
+      if (b.startsWith(prefix)) { curVal = Number(b.split(':')[1]) || 0; break; }
+    }
+  }
+  return setGuildPerm(buffStr, key, curVal + addValue);
 }
 
 // ============================================================
@@ -545,15 +600,24 @@ async function startFarming(ctx, userId, slotIndex, petItemId, farmMultiplier) {
   if (!ctx.user) return fail('ต้องล็อกอิน');
   const uid = userId || ctx.user.userId;
   const sb = getSupabase();
+  const slot = Number(slotIndex) || 0;
+
   // ตรวจ pet
   const { data: pet } = await sb.from('inventory').select('*').eq('item_id', petItemId).eq('user_id', uid).maybeSingle();
   if (!pet || pet.category !== 'pets') return fail('เลือกสัตว์เลี้ยงในกระเป๋า (ที่ไม่ใช่ตัวที่สวมใส่)');
   if (pet.is_locked) return fail('สัตว์ตัวนี้ถูกล็อคอยู่');
 
+  // ถ้า slot นี้มี pet เก่าอยู่ — ปลดล็อค pet เก่าก่อน (กันสภาพที่ลอคไว้แต่ไม่ได้ฟาร์มแล้ว)
+  const { data: oldFarm } = await sb.from('guild_farm').select('pet_item_id').eq('user_id', uid).eq('slot_index', slot).maybeSingle();
+  if (oldFarm && oldFarm.pet_item_id && oldFarm.pet_item_id !== petItemId) {
+    await sb.from('inventory').update({ is_locked: false, locked_reason: '' }).eq('item_id', oldFarm.pet_item_id);
+  }
+
+  // ล็อค pet ใหม่
   await sb.from('inventory').update({ is_locked: true, locked_reason: 'farming' }).eq('item_id', petItemId);
 
   const { error } = await sb.from('guild_farm').upsert({
-    user_id: uid, slot_index: Number(slotIndex) || 0,
+    user_id: uid, slot_index: slot,
     pet_item_id: petItemId, started_at: new Date().toISOString(),
     farm_multiplier: Number(farmMultiplier) || 1
   }, { onConflict: 'user_id,slot_index' });
