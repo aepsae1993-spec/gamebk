@@ -469,7 +469,9 @@ async function getGuildFarmData(ctx, userId) {
       enhance: pet ? (Number(pet.enhance_level) || 0) : 0,
       petLevel,
       rarity: pet ? (rarityMap[pet.item_key] || 'C') : 'C',
-      startTime: f.started_at,
+      // ส่งเป็น ms (number) เพื่อให้ frontend ใช้ Date.now() - pet.startTime ได้ตรง ๆ
+      startTime: startMs,
+      startedAt: f.started_at,
       farmMultiplier: multi,
       exp: accruedExp,
       maxHours: FARM_MAX_HOURS

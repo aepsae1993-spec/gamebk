@@ -32,9 +32,9 @@ async function calcProgress(sb, userId, ps, type, today) {
   }
 }
 
-// mirror: getDailyQuests(userId)
+// mirror: getDailyQuests(userId) — return { success, quests, today }
 async function getDailyQuests(ctx, userId) {
-  if (!ctx.user) return [];
+  if (!ctx.user) return { success: true, quests: [], today: todayDate() };
   const uid = userId || ctx.user.userId;
   const sb = getSupabase();
   const today = todayDate();
@@ -47,9 +47,9 @@ async function getDailyQuests(ctx, userId) {
     cfgs = r.data || [];
   } catch (e) {
     console.error('[getDailyQuests] config exception:', e);
-    return [];
+    return { success: true, quests: [], today };
   }
-  if (cfgs.length === 0) return [];
+  if (cfgs.length === 0) return { success: true, quests: [], today };
 
   // โหลด claims + pet_stats แบบ tolerant — ล้มเหลวก็ใส่ default ได้
   let claims = [], ps = null;
@@ -78,7 +78,7 @@ async function getDailyQuests(ctx, userId) {
       isBonus: false
     });
   }
-  return result;
+  return { success: true, quests: result, today };
 }
 
 // mirror: claimDailyQuestReward(userId, questId)

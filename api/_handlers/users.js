@@ -16,9 +16,10 @@ function rowToUser(u) {
   };
 }
 
-// mirror: getAllUsers(currentUser)
+// mirror: getAllUsers(currentUser) — เฉพาะ Admin/Teacher (student เรียก = []  เงียบ ๆ)
 async function getAllUsers(ctx) {
-  requireRole(ctx, ['Admin','Teacher']);
+  if (!ctx.user) return [];
+  if (!['Admin','Teacher'].includes(ctx.user.role)) return [];
   const sb = getSupabase();
   const { data, error } = await sb.from('users')
     .select('*').order('created_at', { ascending: false });
