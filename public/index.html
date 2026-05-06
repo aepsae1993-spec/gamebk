@@ -3159,7 +3159,7 @@ get currentSoulShopItems() {
                                 this.useActiveSkill = false;
                                 this.executeBattle('auto_win', dmgVal);
                             }
-                        }, 2000);
+                        }, 800);
                     } else {
                         this.battleState = 'choosing';
                     }
@@ -3195,7 +3195,7 @@ get currentSoulShopItems() {
                             this.useActiveSkill = false;
                             await this.executeBattle(result, dmgVal);
                         }
-                    }, 1500);
+                    }, 600);
                 },
 
                 async executeBattle(result, dmgVal) {
